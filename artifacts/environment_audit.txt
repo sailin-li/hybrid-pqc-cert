@@ -1,0 +1,56 @@
+hybrid-pqc-cert environment audit (2026-09-08, Asia/Shanghai)
+
+Default command environment
+---------------------------
+which openssl: /usr/bin/openssl
+openssl version: OpenSSL 3.0.2 15 Mar 2022
+openssl runtime library: /lib/x86_64-linux-gnu/libcrypto.so.3 (3.0.2)
+pkg-config openssl version: 3.0.2
+pkg-config openssl flags: -lssl -lcrypto
+
+Project-selected OpenSSL
+------------------------
+source/build: third_party/openssl
+source tag: openssl-3.2.0
+source commit: cf2877791ce7508684109664f467c9e40987692f
+header: third_party/openssl/include/openssl/opensslv.h (3.2.0)
+library: third_party/openssl/libcrypto.so.3 (3.2.0)
+CLI with matching runtime library: OpenSSL 3.2.0 23 Nov 2023
+CMake configure result: exact version 3.2.0, matching source header/library
+
+GmSSL
+-----
+command: /usr/local/bin/gmssl
+reported version: GmSSL 3.3.0-dev.1183
+source describe: v3.2.0-51-g24ae4827
+source commit: 24ae482701a7b124826c382fffc55c19f76d475d
+installed version header and library match the source build artifacts.
+
+liboqs
+------
+pkg-config version: 0.16.0
+pkg-config flags: -I/usr/local/include -L/usr/local/lib -loqs
+installed library: /usr/local/lib/liboqs.a
+source describe: 0.16.0-23-gc27c88b76
+source commit: c27c88b76473f67a8072ce5b66874d172287ff96
+installed static library and configuration header match the source build artifacts.
+
+CRYSTALS-Dilithium
+------------------
+repository: official pq-crystals/dilithium source tree
+source commit: d35ba3fe5449bee3e6d43e1f296c3ca818bd36be
+implementation selected by this project: ref
+parameter set: Dilithium2
+public key bytes: 1312
+secret key bytes: 2560
+signature bytes: 2420
+
+Legacy prototype observations
+-----------------------------
+The legacy test directory described below was removed after the modular
+implementation and regression tests were completed.
+test/dilithium_test.c uses a removed liboqs identifier and does not compile
+against installed liboqs 0.16.0.
+test/hybrid_sm2_dilithium_test uses OpenSSL EVP plus the direct Dilithium ref API.
+Its previously built binary had a stale /home/wuwu/openssl RUNPATH and loaded
+the system OpenSSL 3.0.2 by default.

@@ -1,0 +1,9 @@
+/build*/
+/.agents/
+/.codex/
+
+/keys/*
+!/keys/README.md
+
+*.docx
+*.pdf
