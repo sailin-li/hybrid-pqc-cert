@@ -4,10 +4,11 @@
 
 项目名：`hybrid-pqc-cert`，课题 5“国密证书支持抗量子算法方案设计”。
 
-当前阶段只实现证书层：实验性 SM2 + CRYSTALS-Dilithium2 Composite
-Signature、Root Hybrid CA、Root 签发 Server、两级链与严格双验证。不要在本
-阶段实现 GM/T 0024、PQKEX、ML-KEM/FIPS 203、TLS 握手或
-`post-quantum_pre_shared_key`。
+当前已完成证书层和独立 KEM primitive：实验性 SM2 +
+CRYSTALS-Dilithium2 Composite Signature、Root Hybrid CA、Root 签发 Server、
+两级链与严格双验证，以及 FIPS 203 ML-KEM-768 KeyGen/Encaps/Decaps。不要把
+ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、GM/T 0024、PQKEX、TLS 握手或
+`post-quantum_pre_shared_key`，除非后续任务明确要求。
 
 不要把总体课题目标和当前实现进度混为一谈。
 
@@ -29,6 +30,56 @@ Signature、Root Hybrid CA、Root 签发 Server、两级链与严格双验证。
   issuer/subject link、课题 Dilithium/PQC 标识扩展、Composite OID 验证。
 - primitive、Composite key/signature、X.509 集成和 12 个链负向测试。
 - 证书生成、检查、详细链验证及 OpenSSL ASN.1 parse artifact。
+- 独立 `include/mlkem.h`、`src/mlkem.c` FIPS 203 ML-KEM-768 wrapper。
+- ML-KEM-768 正向、12 类要求的负向/implicit-rejection 测试和 NIST ACVP KAT。
+- `mlkem_demo`，不输出 decapsulation key 或 shared secret。
+
+## ML-KEM primitive 边界
+
+ML-KEM 使用固定 liboqs 0.16.0 commit
+`c27c88b76473f67a8072ce5b66874d172287ff96` 的
+`OQS_KEM_alg_ml_kem_768`。CMake 必须维持 minimal build
+`KEM_ml_kem_768`；liboqs 源码中虽存在旧 Kyber，`OQS_KEM_alg_kyber_768` 不得
+启用、链接或 fallback。
+
+```text
+ek:            1184 bytes
+dk:            2400 bytes
+ciphertext:    1088 bytes
+shared secret:   32 bytes
+```
+
+wrapper 必须同时做编译期和 runtime length/provider 检查。Encapsulation-key
+modulus check 与 decapsulation-key embedded hash check 委托正式
+`mlkem-native` provider。篡改但长度正确的 ciphertext 遵循 implicit rejection：
+Decaps 可成功产生不同 secret，不能把该返回值解释为 ciphertext 已认证。
+
+生产 API 不得暴露 deterministic `d`、`z`、`m`；它们只允许在 KAT test 中通过
+liboqs test API 使用。当前 KAT 是 NIST ACVP-Server v1.1.0.42 FIPS203：
+ML-KEM-768 KeyGen tgId 2/tcId 26、Encaps/Decaps tgId 2/tcId 26，逐字节比较
+ek/dk/ciphertext/shared secret。
+
+ML-KEM key 仅在内存中使用，不持久化，不进入 Composite Certificate SPKI。
+`mlkem` target 与 `hybrid_pqc` target 保持独立。当前证书编码和 Composite 签名
+流程不得因 ML-KEM 集成而改变。
+
+## 当前验证基线
+
+本阶段完成后的基线结果：
+
+```text
+normal clean build:        PASS
+normal CTest:              10/10 PASS
+ASan + UBSan CTest:        10/10 PASS
+mlkem_demo:                PASS
+NIST ACVP ML-KEM-768 KAT: PASS
+Root -> Server chain:      VALID
+```
+
+其中原有 8 项 Composite/证书测试全部保持通过，新增 `mlkem` 和 `mlkem_kat`
+两项。后续修改 ML-KEM、构建配置或依赖时，必须继续运行全部 10 项测试，不能只
+运行新增测试。生成的 liboqs `oqsconfig.h` 还必须确认
+`OQS_ENABLE_KEM_ml_kem_768` 已启用且 `OQS_ENABLE_KEM_kyber_768` 未启用。
 
 ## 实验性质与标准参考
 
@@ -172,7 +223,8 @@ Dilithium: d35ba3fe5449bee3e6d43e1f296c3ca818bd36be
 
 - 核心显式链接 `third_party/openssl`，不能回退系统 OpenSSL。
 - Dilithium 只用 `third_party/dilithium/ref` 和 mode 2。
-- GmSSL 与 liboqs 未链接核心。
+- GmSSL 未链接核心。liboqs 仅链接独立 `mlkem` target，不链接 Composite/X.509
+  的 `hybrid_pqc` target。
 - 未经明确要求不修改 submodule；第三方补丁放 `patches/`。
 
 ## 构建、工具和测试
@@ -195,6 +247,8 @@ composite_message
 hybrid_key_store
 hybrid_x509
 hybrid_chain
+mlkem
+mlkem_kat
 ```
 
 生成和验证：
@@ -206,6 +260,7 @@ HYBRID_KEY_PASSPHRASE='use-a-strong-local-secret' \
   certs/server_hybrid.crt certs/server_hybrid.der
 ./build/verify_chain certs/root_hybrid.crt certs/server_hybrid.crt
 ./build/inspect_hybrid_cert certs/server_hybrid.crt
+./build/mlkem_demo
 ```
 
 OpenSSL 结构检查需要固定 3.2.0 动态库：

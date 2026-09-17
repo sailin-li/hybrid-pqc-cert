@@ -15,6 +15,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 set(DILITHIUM_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dilithium"
     CACHE PATH "CRYSTALS-Dilithium source directory")
+set(LIBOQS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/liboqs"
+    CACHE PATH "liboqs source directory")
 if(NOT DEFINED OPENSSL_ROOT_DIR)
     set(OPENSSL_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
 endif()
@@ -23,6 +25,27 @@ find_package(OpenSSL 3.2.0 EXACT REQUIRED COMPONENTS Crypto)
 message(STATUS "OpenSSL version: ${OPENSSL_VERSION}")
 message(STATUS "OpenSSL include: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "OpenSSL crypto: ${OPENSSL_CRYPTO_LIBRARY}")
+
+if(NOT EXISTS "${LIBOQS_SOURCE_DIR}/src/kem/ml_kem/kem_ml_kem_768.c")
+    message(FATAL_ERROR
+            "LIBOQS_SOURCE_DIR does not provide the ML-KEM-768 implementation")
+endif()
+
+# Build only the final FIPS 203 ML-KEM-768 implementation. In particular, the
+# legacy Kyber family that is also present in liboqs is disabled and cannot be
+# selected as a fallback.
+set(OQS_MINIMAL_BUILD "KEM_ml_kem_768" CACHE STRING
+    "Algorithms included in the embedded liboqs build" FORCE)
+set(OQS_BUILD_ONLY_LIB ON CACHE BOOL "Build only the liboqs library" FORCE)
+set(OQS_DIST_BUILD OFF CACHE BOOL "Disable multi-architecture dispatch" FORCE)
+set(OQS_OPT_TARGET generic CACHE STRING "Use portable liboqs code" FORCE)
+set(OQS_USE_OPENSSL OFF CACHE BOOL "Use liboqs internal primitives" FORCE)
+set(CMAKE_C_EXTENSIONS ON)
+add_subdirectory("${LIBOQS_SOURCE_DIR}"
+                 "${CMAKE_CURRENT_BINARY_DIR}/liboqs" EXCLUDE_FROM_ALL)
+set(CMAKE_C_EXTENSIONS OFF)
+message(STATUS "liboqs source: ${LIBOQS_SOURCE_DIR}")
+message(STATUS "liboqs minimal algorithm: ML-KEM-768 (FIPS 203)")
 
 set(DILITHIUM_REF_DIR "${DILITHIUM_SOURCE_DIR}/ref")
 if(NOT EXISTS "${DILITHIUM_REF_DIR}/api.h")
@@ -62,6 +85,11 @@ target_include_directories(hybrid_pqc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 target_link_libraries(hybrid_pqc PUBLIC OpenSSL::Crypto dilithium_ref)
 enable_project_warnings(hybrid_pqc)
 
+add_library(mlkem STATIC src/mlkem.c)
+target_include_directories(mlkem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(mlkem PRIVATE oqs)
+enable_project_warnings(mlkem)
+
 enable_testing()
 foreach(test_name IN ITEMS dilithium sm2 hybrid_sign)
     add_executable(test_${test_name} tests/test_${test_name}.c)
@@ -78,6 +106,16 @@ foreach(test_name IN ITEMS composite_key composite_message hybrid_key_store
     add_test(NAME ${test_name} COMMAND test_${test_name})
 endforeach()
 
+add_executable(test_mlkem tests/test_mlkem.c)
+target_link_libraries(test_mlkem PRIVATE mlkem)
+enable_project_warnings(test_mlkem)
+add_test(NAME mlkem COMMAND test_mlkem)
+
+add_executable(test_mlkem_kat tests/test_mlkem_kat.c)
+target_link_libraries(test_mlkem_kat PRIVATE mlkem oqs)
+enable_project_warnings(test_mlkem_kat)
+add_test(NAME mlkem_kat COMMAND test_mlkem_kat)
+
 add_executable(generate_demo_chain tools/generate_demo_chain.c)
 target_link_libraries(generate_demo_chain PRIVATE hybrid_pqc)
 enable_project_warnings(generate_demo_chain)
@@ -89,3 +127,7 @@ enable_project_warnings(verify_chain)
 add_executable(inspect_hybrid_cert tools/inspect_hybrid_cert.c)
 target_link_libraries(inspect_hybrid_cert PRIVATE hybrid_pqc)
 enable_project_warnings(inspect_hybrid_cert)
+
+add_executable(mlkem_demo tools/mlkem_demo.c)
+target_link_libraries(mlkem_demo PRIVATE mlkem)
+enable_project_warnings(mlkem_demo)

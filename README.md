@@ -2,7 +2,8 @@
 
 本项目实现一个两级实验 PKI：Root CA 和 Server 均使用单一 Composite
 X.509 算法标识，组件为 SM2/SM3 与官方 reference
-CRYSTALS-Dilithium2。
+CRYSTALS-Dilithium2。项目另有一个完全独立的 FIPS 203 ML-KEM-768
+primitive wrapper，用于验证 KeyGen、Encaps 和 Decaps；它尚未接入协议层。
 
 > Experimental SM2 + CRYSTALS-Dilithium adaptation based on
 > draft-ietf-lamps-pq-composite-sigs-19.
@@ -25,10 +26,12 @@ FIPS 204 参数集。
 - Root → Server 两级链与严格 `DilithiumValid && SM2Valid` 验证；
 - CA/Server Hybrid Private Key 加密持久化、加载及证书 SPKI 匹配检查；
 - 正向、primitive 反向和 12 个证书链反向测试；
-- PEM/DER 证书生成、检查和详细链验证工具。
+- PEM/DER 证书生成、检查和详细链验证工具；
+- FIPS 203 ML-KEM-768 KeyGen、Encaps、Decaps wrapper；
+- ML-KEM 正向、输入错误、implicit rejection 和 NIST ACVP 对照测试。
 
-本阶段不实现 GM/T 0024、PQKEX、ML-KEM/FIPS 203、TLS 握手或
-`post-quantum_pre_shared_key`。
+当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、GM/T 0024 PQKEX、TLS
+握手或 `post-quantum_pre_shared_key`。
 
 ## 算法和编码
 
@@ -146,6 +149,65 @@ Server Hybrid Certificate
 Root 被显式配置为 trust anchor；自签名验证只证明其 Composite 自签名在密码学
 上有效，不是 Root 获得信任的来源。
 
+## FIPS 203 / ML-KEM-768
+
+ML-KEM primitive 位于：
+
+```text
+include/mlkem.h
+src/mlkem.c
+```
+
+它是独立的 `mlkem` library target，不依赖也不被 `hybrid_pqc`、Composite
+Signature 或 X.509 模块依赖：
+
+```text
+Authentication                          Key Establishment
+SM2 + CRYSTALS-Dilithium2               FIPS 203 ML-KEM-768
+        |                                       |
+Composite Signature Certificate         standalone primitive only
+                                                |
+                                                v
+                                  future SM2 + ML-KEM-768 Hybrid KEX
+                                                |
+                                                v
+                                         future PQKEX
+```
+
+实现使用仓库固定的 liboqs 0.16.0（commit
+`c27c88b76473f67a8072ce5b66874d172287ff96`），algorithm identifier 为
+`OQS_KEM_alg_ml_kem_768` / `ML-KEM-768`，其 ML-KEM wrapper 标记
+`alg_version = "FIPS203"`，底层是 liboqs 收录的 `mlkem-native`。CMake 使用
+`OQS_MINIMAL_BUILD=KEM_ml_kem_768`，旧 `Kyber768`、`kyber_768` 等算法即使在
+liboqs 源码树中存在，也不会被编译或作为 fallback。
+
+固定参数为：
+
+```text
+encapsulation key (ek): 1184 bytes
+decapsulation key (dk): 2400 bytes
+ciphertext:             1088 bytes
+shared secret:            32 bytes
+```
+
+wrapper 在每次操作前检查 provider 可用性、正式算法名、`FIPS203` 版本标记和
+全部四个 runtime length，并对 API 输入作 NULL、精确输入长度和输出容量检查。
+FIPS 203 的 encapsulation-key modulus check 与 decapsulation-key embedded
+public-key-hash check 由 `mlkem-native` provider 在 Encaps/Decaps 内执行；本项目
+不重复编写不完整的多项式检查。长度正确但内容被修改的 ciphertext 使用 FIPS
+203 implicit rejection：Decaps 仍可输出 32-byte secret，测试判断它与原合法
+shared secret 不同，而不把“API 返回成功”误写成 ciphertext 已认证。
+
+生产 API 只暴露随机化的 KeyGen/Encaps/Decaps。确定性 `d`、`z`、`m` 入口只在
+`tests/test_mlkem_kat.c` 使用，未进入 `include/mlkem.h`。KAT 来源是 NIST
+ACVP-Server tag `v1.1.0.42` 的 FIPS203 vectors：ML-KEM-768 KeyGen tgId 2 / tcId
+26，以及 Encaps/Decaps tgId 2 / tcId 26；测试逐字节比较 ek、dk、ciphertext 和
+shared secret。
+
+这表示项目集成的是 FIPS 203 定义的 ML-KEM-768 算法，不表示 liboqs 或本项目
+本身获得了 CMVP/FIPS 140 module validation。ML-KEM key 目前仅在内存中存在，
+不持久化，也不进入当前 Composite Certificate SPKI。
+
 ## 构建、生成和验证
 
 依赖初始化：
@@ -161,6 +223,14 @@ cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+独立运行 ML-KEM demo：
+
+```sh
+./build/mlkem_demo
+```
+
+它只输出 provider、参数长度和 PASS/FAIL，不打印 dk 或 shared secret。
 
 口令只从环境变量读取，不放在命令行或日志中。首次运行生成并持久化四组互不
 复用的组件密钥；后续运行加载 key store，并在签发前验证 loaded CA/Server
@@ -222,3 +292,5 @@ ASAN_OPTIONS=detect_leaks=0 \
 
 - [draft-ietf-lamps-pq-composite-sigs-19](https://datatracker.ietf.org/doc/html/draft-ietf-lamps-pq-composite-sigs-19)
 - [RFC 5612 documentation enterprise number](https://www.rfc-editor.org/rfc/rfc5612.html)
+- [NIST FIPS 203 final](https://csrc.nist.gov/pubs/fips/203/final)
+- [NIST ACVP-Server v1.1.0.42](https://github.com/usnistgov/ACVP-Server/tree/v1.1.0.42/gen-val/json-files)
