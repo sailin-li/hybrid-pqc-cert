@@ -1,6 +1,7 @@
 /build*/
 /.agents/
 /.codex/
+AGENTS.md
 
 /keys/*
 !/keys/README.md
