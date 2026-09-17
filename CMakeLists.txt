@@ -52,10 +52,12 @@ enable_project_warnings(dilithium_ref)
 add_library(hybrid_pqc
     src/dilithium_wrapper.c
     src/sm2_wrapper.c
+    src/composite_key.c
+    src/composite_sig.c
+    src/hybrid_key_store.c
     src/hybrid_sign.c
-    src/hybrid_asn1.c
-    src/hybrid_cert.c
-    src/hybrid_verify.c)
+    src/hybrid_x509.c
+    src/hybrid_chain.c)
 target_include_directories(hybrid_pqc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(hybrid_pqc PUBLIC OpenSSL::Crypto dilithium_ref)
 enable_project_warnings(hybrid_pqc)
@@ -68,20 +70,22 @@ foreach(test_name IN ITEMS dilithium sm2 hybrid_sign)
     add_test(NAME ${test_name} COMMAND test_${test_name})
 endforeach()
 
-add_executable(test_hybrid_asn1 tests/test_hybrid_asn1.c)
-target_link_libraries(test_hybrid_asn1 PRIVATE hybrid_pqc)
-enable_project_warnings(test_hybrid_asn1)
-add_test(NAME hybrid_asn1 COMMAND test_hybrid_asn1)
+foreach(test_name IN ITEMS composite_key composite_message hybrid_key_store
+                           hybrid_x509 hybrid_chain)
+    add_executable(test_${test_name} tests/test_${test_name}.c)
+    target_link_libraries(test_${test_name} PRIVATE hybrid_pqc)
+    enable_project_warnings(test_${test_name})
+    add_test(NAME ${test_name} COMMAND test_${test_name})
+endforeach()
 
-add_executable(test_hybrid_cert tests/test_hybrid_cert.c)
-target_link_libraries(test_hybrid_cert PRIVATE hybrid_pqc)
-enable_project_warnings(test_hybrid_cert)
-add_test(NAME hybrid_cert COMMAND test_hybrid_cert)
+add_executable(generate_demo_chain tools/generate_demo_chain.c)
+target_link_libraries(generate_demo_chain PRIVATE hybrid_pqc)
+enable_project_warnings(generate_demo_chain)
 
-add_executable(hybrid_cert_gen tools/hybrid_cert_gen.c)
-target_link_libraries(hybrid_cert_gen PRIVATE hybrid_pqc)
-enable_project_warnings(hybrid_cert_gen)
+add_executable(verify_chain tools/verify_chain.c)
+target_link_libraries(verify_chain PRIVATE hybrid_pqc)
+enable_project_warnings(verify_chain)
 
-add_executable(hybrid_cert_dump tools/hybrid_cert_dump.c)
-target_link_libraries(hybrid_cert_dump PRIVATE hybrid_pqc)
-enable_project_warnings(hybrid_cert_dump)
+add_executable(inspect_hybrid_cert tools/inspect_hybrid_cert.c)
+target_link_libraries(inspect_hybrid_cert PRIVATE hybrid_pqc)
+enable_project_warnings(inspect_hybrid_cert)

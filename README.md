@@ -1,28 +1,160 @@
 # hybrid-pqc-cert
 
-本项目是“国密证书支持抗量子算法方案设计”的实验实现。它保持标准 X.509
-证书外层不变，以 SM2/SM3 签署最终 `TBSCertificate`，并把
-CRYSTALS-Dilithium2 公钥和签名放入私有 X.509v3 扩展。
+本项目实现一个两级实验 PKI：Root CA 和 Server 均使用单一 Composite
+X.509 算法标识，组件为 SM2/SM3 与官方 reference
+CRYSTALS-Dilithium2。
 
-## 依赖与构建
+> Experimental SM2 + CRYSTALS-Dilithium adaptation based on
+> draft-ietf-lamps-pq-composite-sigs-19.
 
-默认依赖：
+本实现只参考该草案的 Composite 架构、消息组合和序列化思想；草案定义的是
+ML-DSA 与 ECDSA/RSA/EdDSA 的组合，不包含 SM2 或 CRYSTALS-Dilithium，因而
+本项目**不符合且不声称符合**该草案。项目不使用 ML-DSA、liboqs ML-DSA 或
+FIPS 204 参数集。
 
-- OpenSSL 3.2.0：`third_party/openssl` 的现有构建产物；
-- CRYSTALS-Dilithium2：`third_party/dilithium/ref`；
-- GmSSL 和 liboqs 仅接受环境审计，本阶段新实现不链接它们。
+## 当前范围
 
-克隆时需要同时初始化第三方 submodule：
+已实现：
 
-```sh
-git clone --recurse-submodules <repository-url>
+- OpenSSL 3.2.0 EVP SM2/SM3 primitive；
+- 官方 `pq-crystals/dilithium/ref`、`DILITHIUM_MODE=2`；
+- 唯一的 Composite Signature Core；
+- Composite 公钥、签名的 raw concat 编解码与严格检查；
+- 自签 Root Hybrid CA；
+- Root CA 签发 Server Hybrid Certificate；
+- Root → Server 两级链与严格 `DilithiumValid && SM2Valid` 验证；
+- CA/Server Hybrid Private Key 加密持久化、加载及证书 SPKI 匹配检查；
+- 正向、primitive 反向和 12 个证书链反向测试；
+- PEM/DER 证书生成、检查和详细链验证工具。
+
+本阶段不实现 GM/T 0024、PQKEX、ML-KEM/FIPS 203、TLS 握手或
+`post-quantum_pre_shared_key`。
+
+## 算法和编码
+
+Composite 算法 OID：
+
+```text
+1.3.6.1.4.1.32473.1.1
 ```
 
-如果已经完成普通克隆，则执行：
+这是基于 RFC 5612 documentation PEN 的**实验/演示 OID**。
+
+> This OID is experimental and is not an IETF/GM/T standardized
+> SM2-Dilithium composite signature OID.
+
+它不能用于生产注册空间，不代表 IANA、IETF 或 GM/T 已分配该组合算法。
+`1.3.6.1.4.1.2.267.7` 是课题指定的 Dilithium/PQC X.509v3 标识扩展，
+不是 IETF generic PQC OID，也不等于 Composite 算法 OID。该扩展只保存 DER
+`NULL` 标识值，不再保存第二公钥或第二签名。
+
+三个 X.509 位置使用同一个 Composite OID，且 `parameters` 必须 ABSENT：
+
+```text
+TBSCertificate.signature.algorithm
+Certificate.signatureAlgorithm.algorithm
+SubjectPublicKeyInfo.algorithm.algorithm
+```
+
+公钥编码直接放在 SPKI 的单个 BIT STRING 中：
+
+```text
+CompositePublicKey = Dilithium2PublicKey || SM2PublicKey
+                   = 1312 bytes          || 65 bytes
+```
+
+SM2 使用 sm2p256v1 未压缩点 `0x04 || X(32) || Y(32)`；解析时检查总长度、
+`0x04`、曲线名，并通过 EVP public check 验证点在曲线上。
+
+签名直接放在 Certificate 的单个 `signatureValue` BIT STRING 中：
+
+```text
+CompositeSignature = Dilithium2Signature || DER(SM2Signature)
+                   = 2420 bytes           || variable DER SEQUENCE(r, s)
+```
+
+SM2 DER 解码必须消耗全部输入、无 trailing bytes、`r/s` 为正非零整数，并且
+重新编码后必须逐字节等于原 DER。
+
+## 唯一 Composite Signature Core
+
+核心位于：
+
+```text
+include/composite_key.h   src/composite_key.c
+include/composite_sig.h   src/composite_sig.c
+```
+
+调用者只提交 raw message `M`。`composite_build_message()` 统一构造：
+
+```text
+PH(M)   = SM3(M)
+Prefix  = ASCII("CompositeAlgorithmSignatures2025")
+Label   = ASCII("COMPSIG-DILITHIUM2-SM2-SM3")
+len(ctx)= 一个无符号字节
+M'      = Prefix || Label || len(ctx) || ctx || SM3(M)
+```
+
+当前普通消息和 X.509 证书均使用空 `ctx`。接口保留 0..255 字节 `ctx`，供未来
+协议规范定义 domain separation；本阶段没有虚构 TLS/GM/T context。
+
+`M'` 同时交给 CRYSTALS-Dilithium2 与现有 SM2-with-SM3 primitive。Composite
+层的 `SM3(M)` 和 SM2 算法内部的 `ZA`/`SM3(ZA || M')` 是两个不同层次，后者
+没有被删除。SM2 ID 集中为 `1234567812345678`。
+
+所有双组件签名只在 `composite_sign()` 内调用两个 primitive；所有双组件验证
+只在 `composite_verify_detailed()` 内调用两个 primitive并作严格 AND 判断。
+`hybrid_sign()`/`hybrid_verify()` 仅是旧消息 API 的兼容适配器，内部委托
+Composite Core，不包含第二套密码算法流程。
+
+```text
+                            Composite Signature Core
+                 composite_build_message / sign / verify
+                                  |
+             +--------------------+--------------------+
+             |                    |                    |
+       Message tests       X.509 Certificate      Future protocol
+         raw M             DER(TBSCertificate)    protocol-signed data
+```
+
+证书签发使用 CA Hybrid Private Key；普通 Server 消息及未来 CertificateVerify
+使用 Server Hybrid Private Key。两者使用相同 core，只是 key、raw `M` 和未来
+可能的 `ctx` 不同。
+
+## PKI 和扩展
+
+```text
+Root Hybrid CA
+├── SPKI: Dilithium_CA_PK || SM2_CA_PK
+├── BasicConstraints: critical, CA:TRUE
+├── KeyUsage: critical, keyCertSign, cRLSign
+└── signatureValue: Dilithium_CA_SIG || DER(SM2_CA_SIG)
+          |
+          | signs DER(Server TBSCertificate) with CA Hybrid SK
+          v
+Server Hybrid Certificate
+├── SPKI: Dilithium_Server_PK || SM2_Server_PK
+├── BasicConstraints: critical, CA:FALSE
+├── KeyUsage: critical, digitalSignature
+├── ExtendedKeyUsage: serverAuth
+├── SubjectAltName: DNS:server.local
+├── SubjectKeyIdentifier / AuthorityKeyIdentifier
+├── 课题 Dilithium/PQC 标识扩展: 1.3.6.1.4.1.2.267.7
+└── signatureValue: Dilithium_CA_SIG || DER(SM2_CA_SIG)
+```
+
+Root 被显式配置为 trust anchor；自签名验证只证明其 Composite 自签名在密码学
+上有效，不是 Root 获得信任的来源。
+
+## 构建、生成和验证
+
+依赖初始化：
 
 ```sh
 git submodule update --init --recursive
 ```
+
+标准构建与测试：
 
 ```sh
 cmake -S . -B build
@@ -30,104 +162,63 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-可用 `OPENSSL_ROOT_DIR`、`CMAKE_PREFIX_PATH` 和 `DILITHIUM_SOURCE_DIR`
-指定其他位置，不包含 `/home/...` 绝对路径。例如：
+口令只从环境变量读取，不放在命令行或日志中。首次运行生成并持久化四组互不
+复用的组件密钥；后续运行加载 key store，并在签发前验证 loaded CA/Server
+Hybrid key 与已有 Root/Server 证书 Composite SPKI 完全匹配：
 
 ```sh
-cmake -S . -B build \
-  -DOPENSSL_ROOT_DIR=/path/to/openssl-3.2.0 \
-  -DDILITHIUM_SOURCE_DIR=/path/to/dilithium
+HYBRID_KEY_PASSPHRASE='use-a-strong-local-secret' \
+  ./build/generate_demo_chain \
+  certs/root_hybrid.crt certs/root_hybrid.der \
+  certs/server_hybrid.crt certs/server_hybrid.der
 ```
 
-可选检查：
+可选第 5 个参数指定其他 key root；默认是 `keys/`。文件布局：
+
+```text
+keys/ca/sm2_private.pem
+keys/ca/dilithium2_private.enc
+keys/server/sm2_private.pem
+keys/server/dilithium2_private.enc
+```
+
+SM2 使用 AES-256-CBC PBES2 加密 PKCS#8。Dilithium2 使用项目自描述的
+AES-256-GCM 认证加密容器，PBKDF2-HMAC-SHA256（200000 次）派生密钥，随机
+16-byte salt 和 12-byte IV；容器保存 Dilithium2 public/secret key，加载后通过
+Composite sign/verify 自检其配对关系。目录权限要求 `0700`，文件 `0600`；
+错误口令、容器篡改、部分 key store 或证书 SPKI 失配均失败关闭。
+
+`composite_build_message()` 的固定测试向量使用 `M="abc"`、
+`ctx=01 02 03`，对完整 94-byte `M'` 逐字节比较。
+
+详细链验证：
+
+```sh
+./build/verify_chain certs/root_hybrid.crt certs/server_hybrid.crt
+./build/inspect_hybrid_cert certs/server_hybrid.crt
+```
+
+使用仓库固定 OpenSSL 3.2.0 做结构检查：
+
+```sh
+env LD_LIBRARY_PATH=third_party/openssl \
+  third_party/openssl/apps/openssl asn1parse \
+  -inform DER -in certs/server_hybrid.der -i
+```
+
+OpenSSL 3.2.0 不认识该实验 Composite OID，因此 `openssl verify` 不能作为
+Composite 密码学验收依据；`verify_chain` 才执行本项目的双组件严格验证。
+
+Sanitizer 回归：
 
 ```sh
 cmake -S . -B build-sanitize -DHYBRID_ENABLE_SANITIZERS=ON
 cmake --build build-sanitize -j
-ctest --test-dir build-sanitize --output-on-failure
+ASAN_OPTIONS=detect_leaks=0 \
+  ctest --test-dir build-sanitize --output-on-failure
 ```
 
-## 混合消息签名
+## 参考
 
-两种算法必须签署完全相同的消息：
-
-```text
-HybridValid = SM2Valid && DilithiumValid
-```
-
-混合签名使用 DER，而不是裸拼接：
-
-```asn1
-HybridSignature ::= SEQUENCE {
-    version              INTEGER,       -- 1
-    sm2Signature         OCTET STRING,
-    dilithiumSignature   OCTET STRING
-}
-```
-
-解码器要求消耗全部输入，因此拒绝截断、错误长度、错误 tag 和尾随数据。
-
-## X.509v3 PQC 扩展
-
-扩展 OID 是课题指定的：
-
-```text
-1.3.6.1.4.1.2.267.7
-```
-
-扩展值为：
-
-```asn1
-PQCInfo ::= SEQUENCE {
-    version       INTEGER,              -- 1
-    algorithm     OBJECT IDENTIFIER,
-    publicKey     OCTET STRING,
-    signature     OCTET STRING OPTIONAL
-}
-```
-
-当前 `algorithm` 使用 OID：
-
-```text
-1.3.6.1.4.1.2.267.7.4.4 = CRYSTALS-Dilithium2
-```
-
-该 OID 来自 NIST 的 PQC 迁移测试文档
-
-### 避免 PQC 签名循环依赖
-
-签发过程严格使用两阶段 TBS：
-
-1. 构造包含 PQC 算法及 Dilithium 公钥、但 `signature` 缺省的 PQCInfo。
-2. 先执行一次 SM2 预签，使 `TBSCertificate.signature` 固定为
-   SM2-with-SM3；该临时外层签名不会进入最终证书。
-3. 通过 `i2d_re_X509_tbs` 得到
-   `TBSCertificate_without_PQC_signature` 的规范 DER。
-4. Dilithium2 对步骤 3 的全部 DER 字节签名。
-5. 将 Dilithium 签名加入同一扩展位置。
-6. SM2/SM3 对包含完整 PQC 扩展的最终 `TBSCertificate` 签名。
-
-验证端复制证书，把 PQCInfo 的可选 `signature` 字段移除，在同一扩展位置
-重建并 DER 编码基础 TBS，然后执行 Dilithium 验签。扩展次序、算法、公钥、
-主题、签发者、有效期和其他 TBS 字段都在 Dilithium 覆盖范围内；只有 PQC
-签名字段自身被排除。
-
-SM2 证书签名使用 SM3 和 SM2 ID `1234567812345678`。SM2 ID 不属于证书
-DER，验证模块在调用 `X509_STORE`/`X509_verify_cert` 前按该项目策略设置 ID。
-
-## 验证模式
-
-- `HYBRID_VERIFY_STRICT`（默认辅助函数）：`SM2 && Dilithium`；缺失、畸形或
-  未知 PQC 算法一律失败关闭。
-- `HYBRID_VERIFY_CLASSICAL_COMPAT`：只要求标准 SM2 证书验证通过。
-- 不提供 `SM2 || Dilithium` 模式。
-
-## 工具
-
-```sh
-./build/hybrid_cert_gen certs/hybrid_cert.pem certs/hybrid_cert.der
-./build/hybrid_cert_dump certs/hybrid_cert.pem
-```
-
-项目实现位于 `include/`、`src/`、`tests/` 和 `tools/`；早期 `test/` 单文件
-原型已在模块化实现和测试完成后移除。
+- [draft-ietf-lamps-pq-composite-sigs-19](https://datatracker.ietf.org/doc/html/draft-ietf-lamps-pq-composite-sigs-19)
+- [RFC 5612 documentation enterprise number](https://www.rfc-editor.org/rfc/rfc5612.html)

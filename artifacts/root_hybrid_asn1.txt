@@ -1,0 +1,59 @@
+    0:d=0  hl=4 l=4212 cons: SEQUENCE
+    4:d=1  hl=4 l=1699 cons:  SEQUENCE
+    8:d=2  hl=2 l=   3 cons:   cont [ 0 ]
+   10:d=3  hl=2 l=   1 prim:    INTEGER           :02
+   13:d=2  hl=2 l=   1 prim:   INTEGER           :01
+   16:d=2  hl=2 l=  12 cons:   SEQUENCE
+   18:d=3  hl=2 l=  10 prim:    OBJECT            :1.3.6.1.4.1.32473.1.1
+   30:d=2  hl=2 l=  72 cons:   SEQUENCE
+   32:d=3  hl=2 l=  11 cons:    SET
+   34:d=4  hl=2 l=   9 cons:     SEQUENCE
+   36:d=5  hl=2 l=   3 prim:      OBJECT            :countryName
+   41:d=5  hl=2 l=   2 prim:      PRINTABLESTRING   :CN
+   45:d=3  hl=2 l=  32 cons:    SET
+   47:d=4  hl=2 l=  30 cons:     SEQUENCE
+   49:d=5  hl=2 l=   3 prim:      OBJECT            :organizationName
+   54:d=5  hl=2 l=  23 prim:      UTF8STRING        :Experimental Hybrid PKI
+   79:d=3  hl=2 l=  23 cons:    SET
+   81:d=4  hl=2 l=  21 cons:     SEQUENCE
+   83:d=5  hl=2 l=   3 prim:      OBJECT            :commonName
+   88:d=5  hl=2 l=  14 prim:      UTF8STRING        :Root Hybrid CA
+  104:d=2  hl=2 l=  30 cons:   SEQUENCE
+  106:d=3  hl=2 l=  13 prim:    UTCTIME           :260917170955Z
+  121:d=3  hl=2 l=  13 prim:    UTCTIME           :270917171055Z
+  136:d=2  hl=2 l=  72 cons:   SEQUENCE
+  138:d=3  hl=2 l=  11 cons:    SET
+  140:d=4  hl=2 l=   9 cons:     SEQUENCE
+  142:d=5  hl=2 l=   3 prim:      OBJECT            :countryName
+  147:d=5  hl=2 l=   2 prim:      PRINTABLESTRING   :CN
+  151:d=3  hl=2 l=  32 cons:    SET
+  153:d=4  hl=2 l=  30 cons:     SEQUENCE
+  155:d=5  hl=2 l=   3 prim:      OBJECT            :organizationName
+  160:d=5  hl=2 l=  23 prim:      UTF8STRING        :Experimental Hybrid PKI
+  185:d=3  hl=2 l=  23 cons:    SET
+  187:d=4  hl=2 l=  21 cons:     SEQUENCE
+  189:d=5  hl=2 l=   3 prim:      OBJECT            :commonName
+  194:d=5  hl=2 l=  14 prim:      UTF8STRING        :Root Hybrid CA
+  210:d=2  hl=4 l=1396 cons:   SEQUENCE
+  214:d=3  hl=2 l=  12 cons:    SEQUENCE
+  216:d=4  hl=2 l=  10 prim:     OBJECT            :1.3.6.1.4.1.32473.1.1
+  228:d=3  hl=4 l=1378 prim:    BIT STRING
+ 1610:d=2  hl=2 l=  95 cons:   cont [ 3 ]
+ 1612:d=3  hl=2 l=  93 cons:    SEQUENCE
+ 1614:d=4  hl=2 l=  15 cons:     SEQUENCE
+ 1616:d=5  hl=2 l=   3 prim:      OBJECT            :X509v3 Basic Constraints
+ 1621:d=5  hl=2 l=   1 prim:      BOOLEAN           :255
+ 1624:d=5  hl=2 l=   5 prim:      OCTET STRING      [HEX DUMP]:30030101FF
+ 1631:d=4  hl=2 l=  14 cons:     SEQUENCE
+ 1633:d=5  hl=2 l=   3 prim:      OBJECT            :X509v3 Key Usage
+ 1638:d=5  hl=2 l=   1 prim:      BOOLEAN           :255
+ 1641:d=5  hl=2 l=   4 prim:      OCTET STRING      [HEX DUMP]:03020106
+ 1647:d=4  hl=2 l=  41 cons:     SEQUENCE
+ 1649:d=5  hl=2 l=   3 prim:      OBJECT            :X509v3 Subject Key Identifier
+ 1654:d=5  hl=2 l=  34 prim:      OCTET STRING      [HEX DUMP]:0420288D3AF1ADD024275553CBFC071AC216263EB13CA9F0E58370A8527EEFB8AD86
+ 1690:d=4  hl=2 l=  15 cons:     SEQUENCE
+ 1692:d=5  hl=2 l=   9 prim:      OBJECT            :1.3.6.1.4.1.2.267.7
+ 1703:d=5  hl=2 l=   2 prim:      OCTET STRING      [HEX DUMP]:0500
+ 1707:d=1  hl=2 l=  12 cons:  SEQUENCE
+ 1709:d=2  hl=2 l=  10 prim:   OBJECT            :1.3.6.1.4.1.32473.1.1
+ 1721:d=1  hl=4 l=2491 prim:  BIT STRING

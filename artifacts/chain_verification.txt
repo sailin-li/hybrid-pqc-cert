@@ -1,0 +1,35 @@
+=== Hybrid Certificate Chain Verification ===
+
+Trust Anchor:
+  Subject: /C=CN/O=Experimental Hybrid PKI/CN=Root Hybrid CA
+  Composite Algorithm: 1.3.6.1.4.1.32473.1.1
+  Dilithium component: CRYSTALS-Dilithium2 (1312-byte public key)
+  SM2 component: sm2p256v1 uncompressed point
+  [INFO] Root is configured as trust anchor
+
+Root self-signature:
+  Dilithium: PASS
+  SM2:       PASS
+  Composite: PASS
+  [PASS] Root composite self-signature cryptographically valid
+
+Server Certificate:
+  Subject:             /C=CN/O=Experimental Hybrid PKI/CN=server.local
+  Issuer/Subject link: PASS
+  Validity:            PASS
+  BasicConstraints:    PASS
+  Issuer CA/KeyUsage:  PASS
+  ExtendedKeyUsage:    PASS
+  SubjectAltName:      PASS
+  SKI/AKI link:        PASS
+  Course Dilithium/PQC extension: PASS
+  Composite OID:       PASS
+
+Certificate signature:
+  Format:     PASS
+  Dilithium:  PASS
+  SM2:        PASS
+  Composite:  PASS
+
+Chain result:
+  VALID

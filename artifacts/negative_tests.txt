@@ -1,0 +1,13 @@
+PASS 1: normal Root -> Server -> VALID
+PASS 2: Dilithium signature byte changed -> Dilithium FAIL, Composite FAIL
+PASS 3: SM2 DER signature changed -> SM2 FAIL, Composite FAIL
+PASS 4: wrong CA SM2 public key -> INVALID
+PASS 5: wrong CA Dilithium public key -> INVALID
+PASS 6: TBSCertificate subject changed without resigning -> INVALID
+PASS 7: missing signature component -> INVALID
+PASS 8: truncated Composite signature -> INVALID
+PASS 9: inner/outer signatureAlgorithm mismatch -> INVALID
+PASS 10: missing 1.3.6.1.4.1.2.267.7 extension -> INVALID
+PASS 11: SM2-only success is not accepted
+PASS 12: Dilithium-only success is not accepted
+PASS: all Root -> Server positive and negative chain tests

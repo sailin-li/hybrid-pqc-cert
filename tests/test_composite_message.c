@@ -1,0 +1,55 @@
+#include "composite_sig.h"
+
+#include <openssl/crypto.h>
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void)
+{
+    static const uint8_t message[] = {0x61, 0x62, 0x63};
+    static const uint8_t context[] = {0x01, 0x02, 0x03};
+    static const uint8_t expected[] = {
+        /* ASCII("CompositeAlgorithmSignatures2025") */
+        0x43, 0x6f, 0x6d, 0x70, 0x6f, 0x73, 0x69, 0x74,
+        0x65, 0x41, 0x6c, 0x67, 0x6f, 0x72, 0x69, 0x74,
+        0x68, 0x6d, 0x53, 0x69, 0x67, 0x6e, 0x61, 0x74,
+        0x75, 0x72, 0x65, 0x73, 0x32, 0x30, 0x32, 0x35,
+        /* ASCII("COMPSIG-DILITHIUM2-SM2-SM3") */
+        0x43, 0x4f, 0x4d, 0x50, 0x53, 0x49, 0x47, 0x2d,
+        0x44, 0x49, 0x4c, 0x49, 0x54, 0x48, 0x49, 0x55,
+        0x4d, 0x32, 0x2d, 0x53, 0x4d, 0x32, 0x2d, 0x53,
+        0x4d, 0x33,
+        /* one-byte ctx length, then ctx */
+        0x03, 0x01, 0x02, 0x03,
+        /* SM3("abc") */
+        0x66, 0xc7, 0xf0, 0xf4, 0x62, 0xee, 0xed, 0xd9,
+        0xd1, 0xf2, 0xd4, 0x6b, 0xdc, 0x10, 0xe4, 0xe2,
+        0x41, 0x67, 0xc4, 0x87, 0x5c, 0xf2, 0xf7, 0xa2,
+        0x29, 0x7d, 0xa0, 0x2b, 0x8f, 0x4b, 0xa8, 0xe0
+    };
+    uint8_t *actual = NULL;
+    size_t actual_len = 0;
+    int result = EXIT_FAILURE;
+
+    if (!composite_build_message(message, sizeof(message),
+                                 context, sizeof(context),
+                                 &actual, &actual_len)) {
+        fputs("FAIL: composite_build_message failed\n", stderr);
+        goto done;
+    }
+    if (actual_len != sizeof(expected) ||
+        CRYPTO_memcmp(actual, expected, sizeof(expected)) != 0) {
+        fprintf(stderr, "FAIL: fixed M' vector mismatch (got %zu, expected %zu)\n",
+                actual_len, sizeof(expected));
+        goto done;
+    }
+    puts("PASS: fixed byte vector for Prefix || Label || len(ctx) || ctx || SM3(M)");
+    result = EXIT_SUCCESS;
+
+done:
+    OPENSSL_free(actual);
+    return result;
+}
