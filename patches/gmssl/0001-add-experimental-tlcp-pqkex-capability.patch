@@ -1,0 +1,459 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2224f706..abc32612 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -696,8 +696,9 @@ if (ENABLE_TLS)
+ 		tools/tls12_server.c
+ 		tools/tls13_client.c
+ 		tools/tls13_server.c
++		tools/pqkex_demo.c
+ 		tools/sctverify.c)
+-	list(APPEND tests tls tls13 tls_ocsp)
++	list(APPEND tests tls tls13 tls_ocsp pqkex)
+ endif()
+ 
+ if (ENABLE_QUIC)
+diff --git a/include/gmssl/tls.h b/include/gmssl/tls.h
+index 7b953aff..4c0080df 100644
+--- a/include/gmssl/tls.h
++++ b/include/gmssl/tls.h
+@@ -247,6 +247,9 @@ typedef enum {
+ 	TLS_extension_ticket_request		= 58,
+ 	TLS_extension_client_id			= 66, // TLCP (GM/T 0024-2023) only
+ 	TLS_extension_renegotiation_info	= 65281,
++	/* Project-private experimental PQKEX capability extension. This value is
++	 * not assigned by GM/T or IANA. */
++	TLS_extension_pqkex			= 65282,
+ } TLS_EXTENSION_TYPE;
+ 
+ const char *tls_extension_name(int ext);
+@@ -967,6 +970,10 @@ typedef struct {
+ 	// 66. client_id (TLCP only)
+ 	int client_id;
+ 
++	// 65282. project-private experimental PQKEX capability (TLCP only)
++	uint16_t pqkex_kems[8];
++	size_t pqkex_kems_cnt;
++
+ 	// 65281. renegotiation_info (TLS 1.2 only)
+ 	int renegotiation_info;
+ 	int empty_renegotiation_info_scsv;
+@@ -1369,6 +1376,11 @@ typedef struct {
+ 	// 66. client_id (TLCP only)
+ 	int client_id;
+ 
++	// 65282. project-private experimental PQKEX capability (TLCP only)
++	int pqkex_offered;
++	int pqkex_negotiated;
++	uint16_t pqkex_selected_kem;
++
+ 	// 65281. renegotiation_info (TLS 1.2 only)
+ 	int secure_renegotiation;
+ 
+@@ -1811,6 +1823,22 @@ enum {
+ int tls_ext_to_bytes(int ext_type, const uint8_t *ext_data, size_t ext_datalen,
+ 	uint8_t **out, size_t *outlen);
+ 
++/* Experimental GM/T 0024 PQKEX capability advertisement. The extension
++ * carries KEM identifiers only. It does not carry a KEM key or ciphertext. */
++#define TLS_PQKEX_MAX_KEMS 8
++#define TLS_PQKEX_KEM_NONE 0x0000
++#define TLS_PQKEX_KEM_MLKEM768 0x0001
++
++int tls_ctx_set_pqkex_kems(TLS_CTX *ctx, const uint16_t *kems, size_t kems_cnt);
++int tls_pqkex_ext_to_bytes(const uint16_t *kems, size_t kems_cnt,
++	uint8_t **out, size_t *outlen);
++int tls_pqkex_from_bytes(uint16_t *kems, size_t *kems_cnt, size_t max_kems,
++	const uint8_t *ext_data, size_t ext_datalen);
++int tls_pqkex_select_kem(const uint16_t *client_kems, size_t client_kems_cnt,
++	const uint16_t *server_kems, size_t server_kems_cnt, uint16_t *selected_kem);
++int tlcp_process_client_pqkex(TLS_CONNECT *conn,
++	const uint8_t *ext_data, size_t ext_datalen);
++
+ const char *tls_trusted_authority_type_name(int type);
+ int tls_trusted_authority_to_bytes(int type, const uint8_t *data, size_t datalen,
+ 	uint8_t **out, size_t *outlen);
+diff --git a/src/tlcp.c b/src/tlcp.c
+index f243c598..c127ebfa 100644
+--- a/src/tlcp.c
++++ b/src/tlcp.c
+@@ -585,6 +585,16 @@ int tlcp_send_client_hello(TLS_CONNECT *conn)
+ 			return -1;
+ 		}
+ 
++		// pqkex (project-private capability advertisement only)
++		if (conn->ctx->pqkex_kems_cnt) {
++			if (tls_pqkex_ext_to_bytes(conn->ctx->pqkex_kems,
++				conn->ctx->pqkex_kems_cnt, &pexts, &extslen) != 1) {
++				error_print();
++				return -1;
++			}
++			conn->pqkex_offered = 1;
++		}
++
+ 		if (tls_record_set_handshake_client_hello(conn->record, &conn->recordlen,
+ 			conn->protocol, conn->client_random, NULL, 0,
+ 			conn->ctx->cipher_suites, conn->ctx->cipher_suites_cnt,
+@@ -1535,6 +1545,15 @@ int tlcp_recv_client_hello(TLS_CONNECT *conn)
+ 			client_id_len = ext_datalen;
+ 			break;
+ 
++		case TLS_extension_pqkex:
++			if (tlcp_process_client_pqkex(conn, ext_data, ext_datalen) != 1) {
++				error_print();
++				tls_send_alert(conn, conn->pqkex_offered
++					? TLS_alert_illegal_parameter : TLS_alert_decode_error);
++				return -1;
++			}
++			break;
++
+ 		default:
+ 			error_print();
+ 			return -1;
+diff --git a/src/tls_ext.c b/src/tls_ext.c
+index f5e4de00..088eaa22 100644
+--- a/src/tls_ext.c
++++ b/src/tls_ext.c
+@@ -62,6 +62,138 @@ int tls_ext_from_bytes(int *type, const uint8_t **data, size_t *datalen, const u
+ 	return 1;
+ }
+ 
++int tls_ctx_set_pqkex_kems(TLS_CTX *ctx, const uint16_t *kems, size_t kems_cnt)
++{
++	size_t i;
++
++	if (!ctx || ctx->protocol != TLS_protocol_tlcp || !kems
++		|| !kems_cnt || kems_cnt > TLS_PQKEX_MAX_KEMS) {
++		error_print();
++		return -1;
++	}
++	for (i = 0; i < kems_cnt; i++) {
++		if (kems[i] != TLS_PQKEX_KEM_MLKEM768) {
++			error_print();
++			return -1;
++		}
++	}
++	memcpy(ctx->pqkex_kems, kems, kems_cnt * sizeof(kems[0]));
++	ctx->pqkex_kems_cnt = kems_cnt;
++	return 1;
++}
++
++int tls_pqkex_ext_to_bytes(const uint16_t *kems, size_t kems_cnt,
++	uint8_t **out, size_t *outlen)
++{
++	uint8_t ext_data[2 + TLS_PQKEX_MAX_KEMS * 2];
++	uint8_t *p = ext_data;
++	size_t ext_datalen = 0;
++	size_t i;
++
++	if (!kems || !kems_cnt || kems_cnt > TLS_PQKEX_MAX_KEMS || !outlen) {
++		error_print();
++		return -1;
++	}
++	tls_uint16_to_bytes((uint16_t)(kems_cnt * 2), &p, &ext_datalen);
++	for (i = 0; i < kems_cnt; i++) {
++		tls_uint16_to_bytes(kems[i], &p, &ext_datalen);
++	}
++	return tls_ext_to_bytes(TLS_extension_pqkex, ext_data, ext_datalen,
++		out, outlen);
++}
++
++int tls_pqkex_from_bytes(uint16_t *kems, size_t *kems_cnt, size_t max_kems,
++	const uint8_t *ext_data, size_t ext_datalen)
++{
++	const uint8_t *list;
++	size_t list_len;
++	size_t count;
++	size_t i;
++
++	if (!kems || !kems_cnt || !max_kems || max_kems > TLS_PQKEX_MAX_KEMS
++		|| !ext_data) {
++		error_print();
++		return -1;
++	}
++	*kems_cnt = 0;
++	if (tls_uint16array_from_bytes(&list, &list_len, &ext_data, &ext_datalen) != 1
++		|| ext_datalen != 0 || list_len < 2 || (list_len & 1)) {
++		error_print();
++		return -1;
++	}
++	count = list_len / 2;
++	if (count > max_kems) {
++		error_print();
++		return -1;
++	}
++	for (i = 0; i < count; i++) {
++		if (tls_uint16_from_bytes(&kems[i], &list, &list_len) != 1) {
++			error_print();
++			return -1;
++		}
++	}
++	if (list_len != 0) {
++		error_print();
++		return -1;
++	}
++	*kems_cnt = count;
++	return 1;
++}
++
++int tls_pqkex_select_kem(const uint16_t *client_kems, size_t client_kems_cnt,
++	const uint16_t *server_kems, size_t server_kems_cnt, uint16_t *selected_kem)
++{
++	size_t i;
++	size_t j;
++
++	if (!selected_kem || !client_kems || !client_kems_cnt
++		|| client_kems_cnt > TLS_PQKEX_MAX_KEMS
++		|| (!server_kems && server_kems_cnt)
++		|| server_kems_cnt > TLS_PQKEX_MAX_KEMS) {
++		error_print();
++		return -1;
++	}
++	*selected_kem = TLS_PQKEX_KEM_NONE;
++	for (i = 0; i < client_kems_cnt; i++) {
++		for (j = 0; j < server_kems_cnt; j++) {
++			if (client_kems[i] == server_kems[j]) {
++				*selected_kem = client_kems[i];
++				return 1;
++			}
++		}
++	}
++	return 0;
++}
++
++int tlcp_process_client_pqkex(TLS_CONNECT *conn,
++	const uint8_t *ext_data, size_t ext_datalen)
++{
++	uint16_t client_kems[TLS_PQKEX_MAX_KEMS];
++	size_t client_kems_cnt = 0;
++	int ret;
++
++	if (!conn || !conn->ctx || conn->protocol != TLS_protocol_tlcp
++		|| conn->pqkex_offered) {
++		error_print();
++		return -1;
++	}
++	if (tls_pqkex_from_bytes(client_kems, &client_kems_cnt,
++		TLS_PQKEX_MAX_KEMS, ext_data, ext_datalen) != 1) {
++		error_print();
++		return -1;
++	}
++	ret = tls_pqkex_select_kem(client_kems, client_kems_cnt,
++		conn->ctx->pqkex_kems, conn->ctx->pqkex_kems_cnt,
++		&conn->pqkex_selected_kem);
++	if (ret < 0) {
++		error_print();
++		return -1;
++	}
++	conn->pqkex_offered = 1;
++	conn->pqkex_negotiated = (ret == 1);
++	return 1;
++}
++
+ /*
+ 3. trusted_ca_keys
+ 
+diff --git a/src/tls_trace.c b/src/tls_trace.c
+index 7080b47c..ffe164e6 100644
+--- a/src/tls_trace.c
++++ b/src/tls_trace.c
+@@ -185,6 +185,7 @@ const char *tls_extension_name(int ext)
+ 	case TLS_extension_quic_transport_parameters: return "quic_transport_parameters";
+ 	case TLS_extension_ticket_request: return "ticket_request";
+ 	case TLS_extension_renegotiation_info: return "renegotiation_info";
++	case TLS_extension_pqkex: return "pqkex (experimental/private)";
+ 	};
+ 	return NULL;
+ }
+diff --git a/tests/pqkextest.c b/tests/pqkextest.c
+new file mode 100644
+index 00000000..894b5804
+--- /dev/null
++++ b/tests/pqkextest.c
+@@ -0,0 +1,108 @@
++/* Project-private experimental PQKEX capability tests. */
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <gmssl/tls.h>
++
++#define CHECK(a) do { if (!(a)) { fprintf(stderr, "FAIL: %s\n", #a); return 1; } } while (0)
++
++int main(void)
++{
++	static const uint8_t expected[] = {
++		0xff, 0x02, 0x00, 0x04, 0x00, 0x02, 0x00, 0x01
++	};
++	static const uint8_t zero_list[] = {0x00, 0x00};
++	static const uint8_t odd_list[] = {0x00, 0x03, 0x00, 0x01, 0xff};
++	static const uint8_t trailing[] = {0x00, 0x02, 0x00, 0x01, 0xff};
++	static const uint8_t declared_too_large[] = {0x00, 0x04, 0x00, 0x01};
++	static const uint8_t truncated_id[] = {0x00, 0x04, 0x00, 0x01, 0x00};
++	static const uint8_t too_many[] = {
++		0x00, 0x12, 0,1, 0,2, 0,3, 0,4, 0,5, 0,6, 0,7, 0,8, 0,9
++	};
++	static const uint8_t unknown[] = {0x00, 0x02, 0x99, 0x99};
++	const uint16_t offered[] = {TLS_PQKEX_KEM_MLKEM768};
++	const uint16_t supported[] = {TLS_PQKEX_KEM_MLKEM768};
++	uint16_t parsed[TLS_PQKEX_MAX_KEMS];
++	size_t parsed_cnt = 0;
++	uint16_t selected = 0xffff;
++	uint8_t encoded[32];
++	uint8_t *p = encoded;
++	size_t encoded_len = 0;
++	uint8_t record[TLS_MAX_RECORD_SIZE];
++	size_t record_len = 0;
++	uint8_t random[32] = {0};
++	const int cipher_suites[] = {TLS_cipher_ecc_sm4_cbc_sm3};
++	int protocol = 0;
++	const uint8_t *parsed_random = NULL;
++	const uint8_t *session_id = NULL;
++	size_t session_id_len = 0;
++	const uint8_t *cipher_suites_data = NULL;
++	size_t cipher_suites_len = 0;
++	const uint8_t *extensions = NULL;
++	size_t extensions_len = 0;
++	TLS_CTX ctx;
++	TLS_CTX server_ctx;
++	TLS_CONNECT server_conn;
++
++	memset(&ctx, 0, sizeof(ctx));
++	ctx.protocol = TLS_protocol_tlcp;
++	CHECK(tls_ctx_set_pqkex_kems(&ctx, offered, 1) == 1);
++	CHECK(ctx.pqkex_kems_cnt == 1
++		&& ctx.pqkex_kems[0] == TLS_PQKEX_KEM_MLKEM768);
++	memset(&server_ctx, 0, sizeof(server_ctx));
++	server_ctx.protocol = TLS_protocol_tlcp;
++	CHECK(tls_ctx_set_pqkex_kems(&server_ctx, supported, 1) == 1);
++	memset(&server_conn, 0, sizeof(server_conn));
++	server_conn.protocol = TLS_protocol_tlcp;
++	server_conn.ctx = &server_ctx;
++
++	CHECK(tls_pqkex_ext_to_bytes(offered, 1, &p, &encoded_len) == 1);
++	CHECK(encoded_len == sizeof(expected));
++	CHECK(memcmp(encoded, expected, sizeof(expected)) == 0);
++	tls_record_set_protocol(record, TLS_protocol_tlcp);
++	CHECK(tls_record_set_handshake_client_hello(record, &record_len,
++		TLS_protocol_tlcp, random, NULL, 0, cipher_suites, 1,
++		encoded, encoded_len) == 1);
++	CHECK(tls_record_get_handshake_client_hello(record, &protocol,
++		&parsed_random, &session_id, &session_id_len,
++		&cipher_suites_data, &cipher_suites_len,
++		&extensions, &extensions_len) == 1);
++	CHECK(protocol == TLS_protocol_tlcp);
++	CHECK(extensions_len == sizeof(expected));
++	CHECK(memcmp(extensions, expected, sizeof(expected)) == 0);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		expected + 4, sizeof(expected) - 4) == 1);
++	CHECK(parsed_cnt == 1 && parsed[0] == TLS_PQKEX_KEM_MLKEM768);
++	CHECK(tls_pqkex_select_kem(parsed, parsed_cnt, supported, 1, &selected) == 1);
++	CHECK(selected == TLS_PQKEX_KEM_MLKEM768);
++	CHECK(tlcp_process_client_pqkex(&server_conn,
++		expected + 4, sizeof(expected) - 4) == 1);
++	CHECK(server_conn.pqkex_offered == 1);
++	CHECK(server_conn.pqkex_negotiated == 1);
++	CHECK(server_conn.pqkex_selected_kem == TLS_PQKEX_KEM_MLKEM768);
++	CHECK(tlcp_process_client_pqkex(&server_conn,
++		expected + 4, sizeof(expected) - 4) != 1);
++
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		unknown, sizeof(unknown)) == 1);
++	CHECK(tls_pqkex_select_kem(parsed, parsed_cnt, supported, 1, &selected) == 0);
++	CHECK(selected == TLS_PQKEX_KEM_NONE);
++
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		zero_list, sizeof(zero_list)) != 1);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		odd_list, sizeof(odd_list)) != 1);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		trailing, sizeof(trailing)) != 1);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		declared_too_large, sizeof(declared_too_large)) != 1);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		truncated_id, sizeof(truncated_id)) != 1);
++	CHECK(tls_pqkex_from_bytes(parsed, &parsed_cnt, TLS_PQKEX_MAX_KEMS,
++		too_many, sizeof(too_many)) != 1);
++
++	printf("PASS: GmSSL TLCP PQKEX capability FF02000400020001\n");
++	printf("PASS: strict parse, unknown KEM, selection, and duplicate rejection\n");
++	printf("PASS: no ML-KEM primitive was called\n");
++	return 0;
++}
+diff --git a/tools/gmssl.c b/tools/gmssl.c
+index 0b86ed9b..0e99baf1 100644
+--- a/tools/gmssl.c
++++ b/tools/gmssl.c
+@@ -95,6 +95,7 @@ extern int tls12_client_main(int argc, char **argv);
+ extern int tls12_server_main(int argc, char **argv);
+ extern int tls13_client_main(int argc, char **argv);
+ extern int tls13_server_main(int argc, char **argv);
++extern int pqkex_demo_main(int argc, char **argv);
+ extern int sctverify_main(int argc, char **argv);
+ #endif
+ #ifdef ENABLE_QUIC
+@@ -273,6 +274,7 @@ static const char *options =
+ 	"  tls12_server      TLS 1.2 server\n"
+ 	"  tls13_client      TLS 1.3 client\n"
+ 	"  tls13_server      TLS 1.3 server\n"
++	"  pqkex_demo       Experimental TLCP PQKEX capability demo\n"
+ #endif
+ #ifdef ENABLE_QUIC
+ 	"  quic_client       QUIC client\n"
+@@ -441,6 +443,8 @@ int main(int argc, char **argv)
+ 			return tls13_client_main(argc, argv);
+ 		} else if (!strcmp(*argv, "tls13_server")) {
+ 			return tls13_server_main(argc, argv);
++		} else if (!strcmp(*argv, "pqkex_demo")) {
++			return pqkex_demo_main(argc, argv);
+ 		} else if (!strcmp(*argv, "sctverify")) {
+ 			return sctverify_main(argc, argv);
+ #endif
+diff --git a/tools/pqkex_demo.c b/tools/pqkex_demo.c
+new file mode 100644
+index 00000000..c8c45393
+--- /dev/null
++++ b/tools/pqkex_demo.c
+@@ -0,0 +1,43 @@
++/* Project-private experimental TLCP PQKEX capability demonstration. */
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <gmssl/tls.h>
++
++int pqkex_demo_main(int argc, char **argv)
++{
++	const uint16_t mlkem768[] = {TLS_PQKEX_KEM_MLKEM768};
++	uint8_t extension[32];
++	uint8_t *p = extension;
++	size_t extension_len = 0;
++	TLS_CTX server_ctx;
++	TLS_CONNECT server_conn;
++
++	(void)argc;
++	(void)argv;
++	memset(&server_ctx, 0, sizeof(server_ctx));
++	server_ctx.protocol = TLS_protocol_tlcp;
++	if (tls_ctx_set_pqkex_kems(&server_ctx, mlkem768, 1) != 1
++		|| tls_pqkex_ext_to_bytes(mlkem768, 1, &p, &extension_len) != 1) {
++		return 1;
++	}
++	memset(&server_conn, 0, sizeof(server_conn));
++	server_conn.protocol = TLS_protocol_tlcp;
++	server_conn.ctx = &server_ctx;
++	if (extension_len != 8
++		|| tlcp_process_client_pqkex(&server_conn,
++			extension + 4, extension_len - 4) != 1) {
++		return 1;
++	}
++
++	printf("=== Experimental TLCP PQKEX Capability ===\n\n");
++	printf("Extension: FF 02 00 04 00 02 00 01\n");
++	printf("Client offered: ML-KEM-768 (0x0001)\n");
++	printf("Server selected: ML-KEM-768 (0x%04X)\n",
++		server_conn.pqkex_selected_kem);
++	printf("PQKEX capability negotiation: %s\n",
++		server_conn.pqkex_negotiated ? "PASS" : "FAIL");
++	printf("ML-KEM KeyGen/Encaps/Decaps: NOT EXECUTED\n");
++	printf("Hybrid secret: NOT DERIVED\n");
++	return server_conn.pqkex_negotiated ? 0 : 1;
++}

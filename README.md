@@ -28,10 +28,13 @@ FIPS 204 参数集。
 - 正向、primitive 反向和 12 个证书链反向测试；
 - PEM/DER 证书生成、检查和详细链验证工具；
 - FIPS 203 ML-KEM-768 KeyGen、Encaps、Decaps wrapper；
-- ML-KEM 正向、输入错误、implicit rejection 和 NIST ACVP 对照测试。
+- ML-KEM 正向、输入错误、implicit rejection 和 NIST ACVP 对照测试；
+- 实验性 GM/T 0024 PQKEX ClientHello capability extension 编解码与协商；
+- 面向固定 GmSSL submodule 的真实 TLCP ClientHello/服务端解析集成补丁。
 
-当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、GM/T 0024 PQKEX、TLS
-握手或 `post-quantum_pre_shared_key`。
+当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP
+PQKEX 握手、TLS 握手或 `post-quantum_pre_shared_key`。目前的 PQKEX 仅完成
+ClientHello capability advertisement 和 server-side KEM selection。
 
 ## 算法和编码
 
@@ -171,7 +174,7 @@ Composite Signature Certificate         standalone primitive only
                                   future SM2 + ML-KEM-768 Hybrid KEX
                                                 |
                                                 v
-                                         future PQKEX
+                              future PQKEX key exchange messages
 ```
 
 实现使用仓库固定的 liboqs 0.16.0（commit
@@ -207,6 +210,100 @@ shared secret。
 这表示项目集成的是 FIPS 203 定义的 ML-KEM-768 算法，不表示 liboqs 或本项目
 本身获得了 CMVP/FIPS 140 module validation。ML-KEM key 目前仅在内存中存在，
 不持久化，也不进入当前 Composite Certificate SPKI。
+
+## Experimental GM/T 0024 PQKEX Extension
+
+仓库固定的 `third_party/GmSSL` 已有 GM/T 0024/TLCP ClientHello、通用 TLS
+Extension 编解码和握手状态机。为保持第三方 submodule 固定且干净，实际 TLCP
+接入只实现一次，不在主仓库另设重复的 PQKEX parser；改动不直接提交到 GmSSL
+工作树，而是保存在：
+
+```text
+patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch
+```
+
+该补丁基于 GmSSL commit `24ae482701a7b124826c382fffc55c19f76d475d`，完成：
+
+- TLCP client 按配置将 `0xFF02` 写入真实 ClientHello extensions；
+- TLCP server 严格解析 capability，拒绝 duplicate，并按 client preference 选择；
+- 将结果保存在 `pqkex_offered`、`pqkex_negotiated` 和
+  `pqkex_selected_kem`，供下一阶段 ServerKeyExchange 使用；
+- 增加 GmSSL 内部固定 wire vector、完整负向解析和 duplicate 测试；
+- 提供 `gmssl pqkex_demo` capability-only 演示命令。
+
+补丁不修改 ServerHello，不携带 ML-KEM public key/ciphertext，不调用 GmSSL 的
+Kyber 或本项目 ML-KEM primitive，也不派生 shared secret。PQKEX wire parser、
+KEM 选择和 TLCP 接入均由该补丁提供，项目中不存在第二套 PQKEX 实现。
+
+实验 ExtensionType：
+
+```text
+PQKEX_EXTENSION_TYPE = 0xFF02 (decimal 65282)
+```
+
+`0xFF02` 是项目私有实验标识，不是 GM/T 或 IANA 正式分配的 PQKEX extension
+identifier。当前唯一协议 KEM ID 为：
+
+```text
+0xFF02 is a project-private experimental extension identifier.
+It is NOT an officially assigned GM/T or IANA PQKEX extension identifier.
+```
+
+```text
+PQKEX_KEM_MLKEM768 = 0x0001  // ML-KEM-768 / FIPS 203
+```
+
+传统组件 SM2 由未来 GM/T 0024 key establishment 负责，不编码为
+`SM2_MLKEM768`。PQKEX extension 当前只表示客户端支持哪些 PQ KEM：
+
+```text
+extension_data = uint16 kem_list_length || uint16 kem_ids[]
+```
+
+单一 ML-KEM-768 的固定编码为：
+
+```text
+FF 02 | 00 04 | 00 02 | 00 01
+ type | extlen | listlen| KEM ID
+```
+
+即 `FF02000400020001`。未知 KEM ID 可以作为 syntactically valid capability
+被解析，但只有 server 本地支持的 ID 才可能被选择；选择策略集中在
+`tls_pqkex_select_kem()`，按客户端偏好顺序选择第一个共同 KEM。两个 `0xFF02`
+extension 会被 ClientHello extension 扫描层拒绝，不采用 first-wins 或
+last-wins。
+
+本阶段不会在 ClientHello 发送 ML-KEM encapsulation key，也不会在 ServerHello
+发送 encapsulation key 或 ciphertext。GmSSL PQKEX 补丁不链接 `mlkem` target，
+不会调用 KeyGen、Encaps 或 Decaps。`TLS_CONNECT.pqkex_negotiated` 仅表示双方
+存在共同 capability，不表示 shared secret 已建立。
+
+后续计划的数据位置是：
+
+```text
+ServerKeyExchange: ML-KEM-768 encapsulation key + selected_kem
+ClientKeyExchange: ML-KEM-768 ciphertext
+```
+
+该分层方式参考已过期的 TLS 1.2 hybrid PQ KEM Internet-Draft
+`draft-campagna-tls-bike-sike-hybrid`，本项目不声称符合该 draft，也不声称这是
+GM/T 正式定义的 PQKEX。
+
+验证 GmSSL 补丁时应使用临时 worktree，不污染固定 submodule。例如：
+
+```sh
+gmssl_worktree="$(mktemp -d)"
+git -C third_party/GmSSL worktree add --detach "$gmssl_worktree" \
+  24ae482701a7b124826c382fffc55c19f76d475d
+git -C "$gmssl_worktree" apply \
+  "$PWD/patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch"
+cmake -S "$gmssl_worktree" -B "$gmssl_worktree/build" \
+  -DBUILD_SHARED_LIBS=OFF -DENABLE_QUIC=OFF -DENABLE_KYBER=OFF
+cmake --build "$gmssl_worktree/build" --target pqkextest gmssl-bin -j
+"$gmssl_worktree/build/bin/pqkextest"
+"$gmssl_worktree/build/bin/gmssl" pqkex_demo
+git -C third_party/GmSSL worktree remove "$gmssl_worktree"
+```
 
 ## 构建、生成和验证
 
@@ -294,3 +391,5 @@ ASAN_OPTIONS=detect_leaks=0 \
 - [RFC 5612 documentation enterprise number](https://www.rfc-editor.org/rfc/rfc5612.html)
 - [NIST FIPS 203 final](https://csrc.nist.gov/pubs/fips/203/final)
 - [NIST ACVP-Server v1.1.0.42](https://github.com/usnistgov/ACVP-Server/tree/v1.1.0.42/gen-val/json-files)
+- [Expired draft-campagna-tls-bike-sike-hybrid-07](https://datatracker.ietf.org/doc/html/draft-campagna-tls-bike-sike-hybrid-07)
+- [IANA TLS ExtensionType registry](https://www.iana.org/assignments/tls-extensiontype-values)

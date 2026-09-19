@@ -7,8 +7,9 @@
 当前已完成证书层和独立 KEM primitive：实验性 SM2 +
 CRYSTALS-Dilithium2 Composite Signature、Root Hybrid CA、Root 签发 Server、
 两级链与严格双验证，以及 FIPS 203 ML-KEM-768 KeyGen/Encaps/Decaps。不要把
-ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、GM/T 0024、PQKEX、TLS 握手或
-`post-quantum_pre_shared_key`，除非后续任务明确要求。
+ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP 握手、TLS
+握手或 `post-quantum_pre_shared_key`，除非后续任务明确要求。当前 PQKEX 只
+实现 ClientHello capability extension 编解码和 KEM 选择。
 
 不要把总体课题目标和当前实现进度混为一谈。
 
@@ -33,6 +34,11 @@ ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、GM/T 0024、PQKEX、TLS 握手或
 - 独立 `include/mlkem.h`、`src/mlkem.c` FIPS 203 ML-KEM-768 wrapper。
 - ML-KEM-768 正向、12 类要求的负向/implicit-rejection 测试和 NIST ACVP KAT。
 - `mlkem_demo`，不输出 decapsulation key 或 shared secret。
+- `patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch` 将 capability
+  接入固定 GmSSL 的真实 TLCP ClientHello 发送与服务端解析路径；submodule 本身
+  保持干净。
+- PQKEX 固定 wire vector、严格解析、未知 KEM、协商、duplicate extension 测试和
+  `gmssl pqkex_demo` 均包含在该补丁内；主仓库不保留第二套 PQKEX 实现。
 
 ## ML-KEM primitive 边界
 
@@ -63,6 +69,49 @@ ML-KEM key 仅在内存中使用，不持久化，不进入 Composite Certificat
 `mlkem` target 与 `hybrid_pqc` target 保持独立。当前证书编码和 Composite 签名
 流程不得因 ML-KEM 集成而改变。
 
+## PQKEX capability 边界
+
+主项目自身没有另写 GM/T 0024/TLCP 协议栈；固定的 `third_party/GmSSL` 已有
+真实 TLCP ClientHello、通用 TLS Extension 编解码和握手状态机。PQKEX 的
+extension_data/完整 Extension 编解码、ClientHello 接入和 capability negotiation
+只在 GmSSL 补丁中实现；改动以
+`patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch` 保存，禁止直接
+提交修改后的 submodule 工作树。
+
+```text
+PQKEX_EXTENSION_TYPE = 0xFF02  // project-private experimental
+PQKEX_KEM_MLKEM768   = 0x0001  // ML-KEM-768 / FIPS 203
+```
+
+`0xFF02` 不是 GM/T 或 IANA 正式分配值。wire format 固定为 big-endian：
+
+```text
+uint16 extension_type
+uint16 extension_length
+uint16 kem_list_length
+uint16 kem_ids[kem_list_length / 2]
+```
+
+单一 ML-KEM-768 的完整字节必须是 `FF02000400020001`。Parser 必须拒绝空列表、
+奇数长度、声明长度不一致、截断、trailing garbage、超过 8 个 KEM 和 duplicate
+`0xFF02` extension。未知 KEM ID 是 syntactically valid，但不得自动映射成已知
+KEM。选择策略是 client preference order，并只集中在
+`tls_pqkex_select_kem()`。
+
+PQKEX 补丁不得 include/link/call `mlkem`、Composite 或 X.509。ClientHello 不携带
+ML-KEM key；本阶段不定义 ServerHello echo。当前 selected KEM 仅写入
+`TLS_CONNECT.pqkex_selected_kem`，供未来 ServerKeyExchange 阶段使用；
+`TLS_CONNECT.pqkex_negotiated` 不表示 keypair、ciphertext 或 shared secret 已存在。
+
+GmSSL 补丁只允许在 TLCP ClientHello 加入 capability，并在 server 解析后写入
+`TLS_CONNECT.pqkex_selected_kem`。不得调用 GmSSL Kyber、本项目 ML-KEM primitive、
+修改 ServerHello 或提前实现 ServerKeyExchange/ClientKeyExchange。补丁必须在
+临时 worktree/副本应用、编译和测试，最终 `third_party/GmSSL` 保持 clean。
+
+该分层只参考 expired Internet-Draft
+`draft-campagna-tls-bike-sike-hybrid-07`，不得声称符合该 draft，也不得声称为
+GM/T 正式 PQKEX。
+
 ## 当前验证基线
 
 本阶段完成后的基线结果：
@@ -73,12 +122,15 @@ normal CTest:              10/10 PASS
 ASan + UBSan CTest:        10/10 PASS
 mlkem_demo:                PASS
 NIST ACVP ML-KEM-768 KAT: PASS
+patched GmSSL pqkextest:   PASS (strict TLCP capability tests)
+patched gmssl pqkex_demo:  PASS (capability only; no ML-KEM operation)
 Root -> Server chain:      VALID
 ```
 
-其中原有 8 项 Composite/证书测试全部保持通过，新增 `mlkem` 和 `mlkem_kat`
-两项。后续修改 ML-KEM、构建配置或依赖时，必须继续运行全部 10 项测试，不能只
-运行新增测试。生成的 liboqs `oqsconfig.h` 还必须确认
+主项目原有 8 项 Composite/证书测试、`mlkem` 和 `mlkem_kat` 全部保持通过；
+PQKEX 由 patched GmSSL 的 `pqkextest` 覆盖。后续修改 PQKEX、ML-KEM、构建配置
+或依赖时，必须同时运行主项目全部 10 项测试和 GmSSL PQKEX 测试。生成的 liboqs
+`oqsconfig.h` 还必须确认
 `OQS_ENABLE_KEM_ml_kem_768` 已启用且 `OQS_ENABLE_KEM_kyber_768` 未启用。
 
 ## 实验性质与标准参考
