@@ -4,12 +4,14 @@
 
 项目名：`hybrid-pqc-cert`，课题 5“国密证书支持抗量子算法方案设计”。
 
-当前已完成证书层和独立 KEM primitive：实验性 SM2 +
+当前已完成证书层、TLCP Certificate 握手接入和独立 KEM primitive：实验性 SM2 +
 CRYSTALS-Dilithium2 Composite Signature、Root Hybrid CA、Root 签发 Server、
 两级链与严格双验证，以及 FIPS 203 ML-KEM-768 KeyGen/Encaps/Decaps。不要把
 ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP 握手、TLS
 握手或 `post-quantum_pre_shared_key`，除非后续任务明确要求。当前 PQKEX 只
-实现 ClientHello capability extension 编解码和 KEM 选择。
+实现 ClientHello capability extension 编解码和 KEM 选择；TLCP Certificate
+阶段已对 Composite signing certificate 和 SM2-SPKI/Composite-signed encryption
+certificate 分别执行严格双验证，但 ServerKeyExchange 仍为原有 SM2 signature。
 
 不要把总体课题目标和当前实现进度混为一谈。
 
@@ -39,6 +41,18 @@ ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP 握手、TLS
   保持干净。
 - PQKEX 固定 wire vector、严格解析、未知 KEM、协商、duplicate extension 测试和
   `gmssl pqkex_demo` 均包含在该补丁内；主仓库不保留第二套 PQKEX 实现。
+- `include/tlcp_hybrid_cert_adapter.h`、`src/tlcp_hybrid_cert_adapter.c` 提供
+  GmSSL 与现有 Composite/X.509 实现之间的 raw-DER 三态适配层。
+- `patches/gmssl/0002-integrate-tlcp-composite-certificate-verification.patch`
+  在 0001 之后接入 TLCP Certificate 接收、strict downgrade 防护、Composite
+  SPKI 的 SM2 component 导入和实验 server loader；GmSSL submodule 保持 clean。
+- `patches/gmssl/0003-verify-composite-signed-tlcp-encryption-certificate.patch`
+  仅让 GmSSL 语法层识别实验 Composite certificate signature OID，并让 hybrid
+  loader 通过 raw index 取得 cert[1]；不在 GmSSL 内实现 Composite 验证。
+- TLCP cert[1] 使用普通 SM2 SPKI、Composite CA signature 和 PQC marker；cert[0]
+  与 cert[1] 都必须 `DilithiumValid && SM2Valid` 才接受 Certificate message。
+- Certificate-chain authentication 是 SM2 + Dilithium2 strict AND；当前
+  ServerKeyExchange proof-of-possession 仍是原 TLCP SM2 signature。
 
 ## ML-KEM primitive 边界
 
@@ -118,18 +132,19 @@ GM/T 正式 PQKEX。
 
 ```text
 normal clean build:        PASS
-normal CTest:              10/10 PASS
-ASan + UBSan CTest:        10/10 PASS
+normal CTest:              12/12 PASS
+ASan + UBSan CTest:        12/12 PASS
 mlkem_demo:                PASS
 NIST ACVP ML-KEM-768 KAT: PASS
 patched GmSSL pqkextest:   PASS (strict TLCP capability tests)
 patched gmssl pqkex_demo:  PASS (capability only; no ML-KEM operation)
+patched TLCP hybrid test:  PASS (Certificate stage + SM2 ServerKeyExchange)
 Root -> Server chain:      VALID
 ```
 
-主项目原有 8 项 Composite/证书测试、`mlkem` 和 `mlkem_kat` 全部保持通过；
+主项目原有测试、adapter、`mlkem` 和 `mlkem_kat` 全部保持通过；
 PQKEX 由 patched GmSSL 的 `pqkextest` 覆盖。后续修改 PQKEX、ML-KEM、构建配置
-或依赖时，必须同时运行主项目全部 10 项测试和 GmSSL PQKEX 测试。生成的 liboqs
+或依赖时，必须同时运行主项目全部 12 项测试和 GmSSL PQKEX 测试。生成的 liboqs
 `oqsconfig.h` 还必须确认
 `OQS_ENABLE_KEM_ml_kem_768` 已启用且 `OQS_ENABLE_KEM_kyber_768` 未启用。
 
@@ -178,8 +193,9 @@ Certificate ::= SEQUENCE {
 }
 ```
 
-以下三个 AlgorithmIdentifier 都必须是 `1.3.6.1.4.1.32473.1.1`，parameters
-ABSENT，不能编码 NULL：
+对 Root 和 TLCP cert[0] Composite signing certificate，以下三个
+AlgorithmIdentifier 都必须是 `1.3.6.1.4.1.32473.1.1`，parameters ABSENT，不能
+编码 NULL：
 
 ```text
 TBSCertificate.signature.algorithm
@@ -192,6 +208,10 @@ SPKI 的单个 BIT STRING 直接包含：
 ```text
 Dilithium2 public key (1312 bytes) || SM2 uncompressed point (65 bytes)
 ```
+
+TLCP cert[1] encryption certificate 是明确例外：只有 TBS/outer signature
+AlgorithmIdentifier 使用 Composite OID；其 SPKI 必须保持普通
+`id-ecPublicKey + sm2p256v1` 和单一 SM2 encryption public key。
 
 顺序不可交换。SM2 编码固定为 `0x04 || X(32) || Y(32)`，解析必须检查精确
 长度、首字节及点在 sm2p256v1 曲线上。

@@ -4,6 +4,7 @@
 
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
+#include <openssl/core_names.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -191,6 +192,57 @@ done:
     return ok;
 }
 
+static int compute_sm2_key_identifier(EVP_PKEY *key,
+                                      unsigned char digest[32])
+{
+    unsigned char public_key[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES];
+    size_t public_key_len = sizeof(public_key);
+    unsigned int digest_len = 0;
+
+    if (key == NULL || !EVP_PKEY_is_a(key, "SM2") ||
+        EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+                                        public_key, sizeof(public_key),
+                                        &public_key_len) <= 0 ||
+        public_key_len != sizeof(public_key) || public_key[0] != 0x04 ||
+        !EVP_Digest(public_key, public_key_len, digest, &digest_len,
+                    EVP_sha256(), NULL) || digest_len != 32u) {
+        OPENSSL_cleanse(public_key, sizeof(public_key));
+        return 0;
+    }
+    OPENSSL_cleanse(public_key, sizeof(public_key));
+    return 1;
+}
+
+static int add_sm2_subject_key_identifier(
+    STACK_OF(X509_EXTENSION) *extensions, EVP_PKEY *key)
+{
+    unsigned char digest[32];
+    ASN1_OCTET_STRING *identifier = NULL;
+    X509_EXTENSION *extension = NULL;
+    int ok = 0;
+
+    if (!compute_sm2_key_identifier(key, digest)) {
+        return 0;
+    }
+    identifier = ASN1_OCTET_STRING_new();
+    if (identifier == NULL ||
+        !ASN1_OCTET_STRING_set(identifier, digest, (int)sizeof(digest))) {
+        goto done;
+    }
+    extension = X509V3_EXT_i2d(NID_subject_key_identifier, 0, identifier);
+    if (extension == NULL || !sk_X509_EXTENSION_push(extensions, extension)) {
+        goto done;
+    }
+    extension = NULL;
+    ok = 1;
+
+done:
+    OPENSSL_cleanse(digest, sizeof(digest));
+    X509_EXTENSION_free(extension);
+    ASN1_OCTET_STRING_free(identifier);
+    return ok;
+}
+
 static int add_authority_key_identifier(
     STACK_OF(X509_EXTENSION) *extensions, const HYBRID_PUBLIC_KEY *issuer_key)
 {
@@ -253,6 +305,45 @@ error:
     return NULL;
 }
 
+static X509_PUBKEY *make_sm2_spki(EVP_PKEY *key)
+{
+    X509_PUBKEY *spki = NULL;
+    ASN1_OBJECT *algorithm = NULL;
+    ASN1_OBJECT *curve = NULL;
+    uint8_t *public_key = NULL;
+    size_t public_key_len = SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES;
+
+    if (key == NULL || !EVP_PKEY_is_a(key, "SM2")) {
+        goto error;
+    }
+    spki = X509_PUBKEY_new();
+    algorithm = OBJ_txt2obj("1.2.840.10045.2.1", 1);
+    curve = OBJ_txt2obj("1.2.156.10197.1.301", 1);
+    public_key = OPENSSL_malloc(public_key_len);
+    if (spki == NULL || algorithm == NULL || curve == NULL ||
+        public_key == NULL ||
+        EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+                                        public_key, public_key_len,
+                                        &public_key_len) <= 0 ||
+        public_key_len != SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES ||
+        public_key[0] != 0x04 ||
+        !X509_PUBKEY_set0_param(spki, algorithm, V_ASN1_OBJECT, curve,
+                                public_key, (int)public_key_len)) {
+        goto error;
+    }
+    algorithm = NULL;
+    curve = NULL;
+    public_key = NULL;
+    return spki;
+
+error:
+    OPENSSL_free(public_key);
+    ASN1_OBJECT_free(curve);
+    ASN1_OBJECT_free(algorithm);
+    X509_PUBKEY_free(spki);
+    return NULL;
+}
+
 static int build_root_extensions(COMPOSITE_TBS_CERTIFICATE *tbs,
                                  const HYBRID_PUBLIC_KEY *ca_public_key)
 {
@@ -296,21 +387,52 @@ static int build_server_extensions(COMPOSITE_TBS_CERTIFICATE *tbs,
            add_pqc_marker(tbs->extensions);
 }
 
+static int build_encryption_server_extensions(
+    COMPOSITE_TBS_CERTIFICATE *tbs,
+    const HYBRID_PUBLIC_KEY *ca_public_key,
+    EVP_PKEY *server_sm2_public_key)
+{
+    tbs->extensions = sk_X509_EXTENSION_new_null();
+    return tbs->extensions != NULL &&
+           add_conf_extension(tbs->extensions, NID_basic_constraints,
+                              "critical,CA:FALSE") &&
+           add_conf_extension(tbs->extensions, NID_key_usage,
+                              "critical,keyEncipherment,keyAgreement") &&
+           add_sm2_subject_key_identifier(tbs->extensions,
+                                          server_sm2_public_key) &&
+           add_authority_key_identifier(tbs->extensions, ca_public_key) &&
+           add_pqc_marker(tbs->extensions);
+}
+
 static COMPOSITE_TBS_CERTIFICATE *make_tbs(
     const HYBRID_PUBLIC_KEY *subject_key, const X509_NAME *issuer,
     const char *subject_common_name, long serial_number, int is_ca,
     const HYBRID_PUBLIC_KEY *ca_public_key, const char *dns_name)
 {
     COMPOSITE_TBS_CERTIFICATE *tbs = NULL;
+    X509_NAME *issuer_copy = NULL;
+    X509_NAME *subject = NULL;
+    X509_PUBKEY *subject_public_key_info = NULL;
 
     tbs = COMPOSITE_TBS_CERTIFICATE_new();
-    if (tbs == NULL) {
+    issuer_copy = X509_NAME_dup(issuer);
+    subject = make_name(subject_common_name);
+    subject_public_key_info = make_composite_spki(subject_key);
+    if (tbs == NULL || issuer_copy == NULL || subject == NULL ||
+        subject_public_key_info == NULL) {
+        X509_PUBKEY_free(subject_public_key_info);
+        X509_NAME_free(subject);
+        X509_NAME_free(issuer_copy);
+        COMPOSITE_TBS_CERTIFICATE_free(tbs);
         return NULL;
     }
+    X509_NAME_free(tbs->issuer);
+    X509_NAME_free(tbs->subject);
+    X509_PUBKEY_free(tbs->subject_public_key_info);
+    tbs->issuer = issuer_copy;
+    tbs->subject = subject;
+    tbs->subject_public_key_info = subject_public_key_info;
     tbs->version = ASN1_INTEGER_new();
-    tbs->issuer = X509_NAME_dup(issuer);
-    tbs->subject = make_name(subject_common_name);
-    tbs->subject_public_key_info = make_composite_spki(subject_key);
     if (tbs->version == NULL || tbs->issuer == NULL || tbs->subject == NULL ||
         tbs->subject_public_key_info == NULL ||
         !ASN1_INTEGER_set(tbs->version, 2) ||
@@ -321,6 +443,46 @@ static COMPOSITE_TBS_CERTIFICATE *make_tbs(
         (is_ca ? !build_root_extensions(tbs, subject_key)
                : !build_server_extensions(tbs, ca_public_key, subject_key,
                                           dns_name))) {
+        COMPOSITE_TBS_CERTIFICATE_free(tbs);
+        return NULL;
+    }
+    return tbs;
+}
+
+static COMPOSITE_TBS_CERTIFICATE *make_sm2_encryption_tbs(
+    EVP_PKEY *subject_key, const X509_NAME *issuer,
+    const char *subject_common_name,
+    const HYBRID_PUBLIC_KEY *ca_public_key)
+{
+    COMPOSITE_TBS_CERTIFICATE *tbs = COMPOSITE_TBS_CERTIFICATE_new();
+    X509_NAME *issuer_copy = X509_NAME_dup(issuer);
+    X509_NAME *subject = make_name(subject_common_name);
+    X509_PUBKEY *subject_public_key_info = make_sm2_spki(subject_key);
+
+    if (tbs == NULL || issuer_copy == NULL || subject == NULL ||
+        subject_public_key_info == NULL) {
+        X509_PUBKEY_free(subject_public_key_info);
+        X509_NAME_free(subject);
+        X509_NAME_free(issuer_copy);
+        COMPOSITE_TBS_CERTIFICATE_free(tbs);
+        return NULL;
+    }
+    X509_NAME_free(tbs->issuer);
+    X509_NAME_free(tbs->subject);
+    X509_PUBKEY_free(tbs->subject_public_key_info);
+    tbs->issuer = issuer_copy;
+    tbs->subject = subject;
+    tbs->subject_public_key_info = subject_public_key_info;
+    tbs->version = ASN1_INTEGER_new();
+    if (tbs->version == NULL || tbs->issuer == NULL || tbs->subject == NULL ||
+        tbs->subject_public_key_info == NULL ||
+        !ASN1_INTEGER_set(tbs->version, 2) ||
+        !ASN1_INTEGER_set(tbs->serial_number, 3) ||
+        !set_composite_algorithm(tbs->signature) ||
+        X509_gmtime_adj(tbs->validity->notBefore, -60) == NULL ||
+        X509_gmtime_adj(tbs->validity->notAfter, 31536000L) == NULL ||
+        !build_encryption_server_extensions(tbs, ca_public_key,
+                                            subject_key)) {
         COMPOSITE_TBS_CERTIFICATE_free(tbs);
         return NULL;
     }
@@ -425,6 +587,30 @@ X509 *hybrid_x509_create_server(const HYBRID_PRIVATE_KEY *ca_private_key,
     return sign_tbs(tbs, ca_private_key);
 }
 
+X509 *hybrid_x509_create_sm2_encryption(
+    const HYBRID_PRIVATE_KEY *ca_private_key,
+    const HYBRID_PUBLIC_KEY *ca_public_key,
+    EVP_PKEY *server_sm2_public_key,
+    const X509 *issuer_certificate,
+    const char *common_name)
+{
+    const X509_NAME *issuer;
+    COMPOSITE_TBS_CERTIFICATE *tbs;
+
+    if (ca_private_key == NULL || ca_public_key == NULL ||
+        server_sm2_public_key == NULL || issuer_certificate == NULL ||
+        common_name == NULL || common_name[0] == '\0') {
+        return NULL;
+    }
+    issuer = X509_get_subject_name(issuer_certificate);
+    if (issuer == NULL) {
+        return NULL;
+    }
+    tbs = make_sm2_encryption_tbs(server_sm2_public_key, issuer,
+                                  common_name, ca_public_key);
+    return sign_tbs(tbs, ca_private_key);
+}
+
 int hybrid_x509_get_tbs_der(X509 *certificate,
                             uint8_t **der, size_t *der_len)
 {
@@ -461,29 +647,56 @@ static int algorithm_is_composite_and_absent(const X509_ALGOR *algorithm)
            strcmp(oid, COMPOSITE_SM2_DILITHIUM_EXPERIMENTAL_OID) == 0;
 }
 
-int hybrid_x509_composite_algorithms_valid(const X509 *certificate)
+int hybrid_x509_composite_signature_algorithms_valid(
+    const X509 *certificate)
 {
     const ASN1_BIT_STRING *signature = NULL;
     const X509_ALGOR *outer = NULL;
     const X509_ALGOR *tbs;
-    X509_PUBKEY *spki;
-    X509_ALGOR *spki_algorithm = NULL;
 
     if (certificate == NULL) {
         return 0;
     }
     X509_get0_signature(&signature, &outer, certificate);
     tbs = X509_get0_tbs_sigalg(certificate);
-    spki = X509_get_X509_PUBKEY(certificate);
-    if (spki == NULL ||
-        !X509_PUBKEY_get0_param(NULL, NULL, NULL, &spki_algorithm, spki)) {
-        return 0;
-    }
     return signature != NULL &&
            algorithm_is_composite_and_absent(tbs) &&
            algorithm_is_composite_and_absent(outer) &&
-           algorithm_is_composite_and_absent(spki_algorithm) &&
            OBJ_cmp(tbs->algorithm, outer->algorithm) == 0;
+}
+
+int hybrid_x509_subject_public_key_is_composite(const X509 *certificate)
+{
+    X509_PUBKEY *spki;
+    X509_ALGOR *algorithm = NULL;
+
+    if (certificate == NULL) {
+        return 0;
+    }
+    spki = X509_get_X509_PUBKEY(certificate);
+    return spki != NULL &&
+           X509_PUBKEY_get0_param(NULL, NULL, NULL, &algorithm, spki) &&
+           algorithm_is_composite_and_absent(algorithm);
+}
+
+int hybrid_x509_subject_public_key_is_sm2(const X509 *certificate)
+{
+    EVP_PKEY *key;
+    int valid;
+
+    if (certificate == NULL) {
+        return 0;
+    }
+    key = X509_get_pubkey((X509 *)certificate);
+    valid = key != NULL && EVP_PKEY_is_a(key, "SM2");
+    EVP_PKEY_free(key);
+    return valid;
+}
+
+int hybrid_x509_composite_algorithms_valid(const X509 *certificate)
+{
+    return hybrid_x509_composite_signature_algorithms_valid(certificate) &&
+           hybrid_x509_subject_public_key_is_composite(certificate);
 }
 
 int hybrid_x509_get_composite_public_key(const X509 *certificate,
@@ -535,6 +748,61 @@ int hybrid_x509_public_key_matches(const X509 *certificate,
     OPENSSL_free(loaded_bytes);
     OPENSSL_free(certificate_bytes);
     hybrid_public_key_cleanup(&certificate_key);
+    return matches;
+}
+
+int hybrid_x509_get_sm2_public_key_octets(
+    const X509 *certificate,
+    uint8_t output[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES])
+{
+    EVP_PKEY *key = NULL;
+    size_t output_len = SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES;
+    int ok = 0;
+
+    if (certificate == NULL || output == NULL) {
+        return 0;
+    }
+    key = X509_get_pubkey((X509 *)certificate);
+    if (key != NULL && EVP_PKEY_is_a(key, "SM2") &&
+        EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+                                        output,
+                                        SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES,
+                                        &output_len) > 0 &&
+        output_len == SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES &&
+        output[0] == 0x04) {
+        ok = 1;
+    }
+    EVP_PKEY_free(key);
+    if (!ok) {
+        memset(output, 0, SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES);
+    }
+    return ok;
+}
+
+int hybrid_x509_sm2_public_key_matches(const X509 *certificate,
+                                       EVP_PKEY *public_key)
+{
+    uint8_t certificate_bytes[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES];
+    uint8_t supplied_bytes[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES];
+    size_t supplied_len = sizeof(supplied_bytes);
+    int matches = 0;
+
+    if (certificate != NULL && public_key != NULL &&
+        EVP_PKEY_is_a(public_key, "SM2") &&
+        hybrid_x509_get_sm2_public_key_octets(certificate,
+                                              certificate_bytes) &&
+        EVP_PKEY_get_octet_string_param(public_key,
+                                        OSSL_PKEY_PARAM_PUB_KEY,
+                                        supplied_bytes,
+                                        sizeof(supplied_bytes),
+                                        &supplied_len) > 0 &&
+        supplied_len == sizeof(supplied_bytes) &&
+        CRYPTO_memcmp(certificate_bytes, supplied_bytes,
+                      sizeof(certificate_bytes)) == 0) {
+        matches = 1;
+    }
+    OPENSSL_cleanse(supplied_bytes, sizeof(supplied_bytes));
+    OPENSSL_cleanse(certificate_bytes, sizeof(certificate_bytes));
     return matches;
 }
 

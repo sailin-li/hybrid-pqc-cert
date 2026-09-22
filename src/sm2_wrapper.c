@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-EVP_PKEY *sm2_generate_keypair(void)
+EVP_PKEY *hybrid_sm2_generate_keypair(void)
 {
     EVP_PKEY_CTX *context = EVP_PKEY_CTX_new_from_name(NULL, "SM2", NULL);
     EVP_PKEY *key = NULL;
@@ -19,9 +19,9 @@ EVP_PKEY *sm2_generate_keypair(void)
     return key;
 }
 
-int sm2_sign(EVP_PKEY *private_key,
-             const unsigned char *message, size_t message_len,
-             unsigned char **signature, size_t *signature_len)
+int hybrid_sm2_sign(EVP_PKEY *private_key,
+                    const unsigned char *message, size_t message_len,
+                    unsigned char **signature, size_t *signature_len)
 {
     EVP_MD_CTX *context = NULL;
     EVP_PKEY_CTX *pkey_context = NULL;
@@ -64,9 +64,9 @@ done:
     return ok;
 }
 
-int sm2_verify(EVP_PKEY *public_key,
-               const unsigned char *message, size_t message_len,
-               const unsigned char *signature, size_t signature_len)
+int hybrid_sm2_verify(EVP_PKEY *public_key,
+                      const unsigned char *message, size_t message_len,
+                      const unsigned char *signature, size_t signature_len)
 {
     EVP_MD_CTX *context = NULL;
     EVP_PKEY_CTX *pkey_context = NULL;

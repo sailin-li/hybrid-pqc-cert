@@ -31,10 +31,38 @@ FIPS 204 参数集。
 - ML-KEM 正向、输入错误、implicit rejection 和 NIST ACVP 对照测试；
 - 实验性 GM/T 0024 PQKEX ClientHello capability extension 编解码与协商；
 - 面向固定 GmSSL submodule 的真实 TLCP ClientHello/服务端解析集成补丁。
+- GmSSL/TLCP Certificate 握手阶段的实验 Composite signing-certificate
+  严格双验证、downgrade 防护和后续 SM2 component ServerKeyExchange 验证。
+- TLCP encryption certificate 保持普通 SM2 SPKI，同时使用 Hybrid CA 的
+  SM2 + Dilithium2 Composite certificate signature；两张实体证书都必须严格
+  双验证通过。
 
 当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP
 PQKEX 握手、TLS 握手或 `post-quantum_pre_shared_key`。目前的 PQKEX 仅完成
 ClientHello capability advertisement 和 server-side KEM selection。
+
+## 实现路线图
+
+```text
+1. Composite Signature Core                         ✅
+2. Composite X.509                                  ✅
+3. Hybrid CA / chain                                ✅
+4. FIPS 203 ML-KEM primitive                        ✅
+5. GM/T 0024 PQKEX capability 与 KEM 选择            ✅
+   6A. TLCP Composite signing certificate           ✅
+   6B. TLCP encryption certificate Composite-sign   ✅
+7. TLS 1.3 PQ-PSK extension                        ⬜
+8. 性能 < 50 ms                                     ⬜
+9. QROM 安全论证                                    ⬜
+10. 经典/量子侧信道防护方案                           ⬜
+```
+
+其中第 5 项的完成范围仅是实验性 TLCP ClientHello capability extension、严格
+编解码与 KEM 选择，不表示已经实现 ML-KEM ServerKeyExchange、
+ClientKeyExchange、Hybrid Secret 或完整 GM/T 0024 PQKEX 握手。6A 已完成
+Composite signing certificate 的证书链双验证；6B 已完成普通 SM2 encryption
+SPKI 与 Composite CA signature 的解耦及双验证。ServerKeyExchange
+proof-of-possession 仍是原 TLCP SM2 signature，后续项目仍为待实现项。
 
 ## 算法和编码
 
@@ -54,13 +82,18 @@ Composite 算法 OID：
 不是 IETF generic PQC OID，也不等于 Composite 算法 OID。该扩展只保存 DER
 `NULL` 标识值，不再保存第二公钥或第二签名。
 
-三个 X.509 位置使用同一个 Composite OID，且 `parameters` 必须 ABSENT：
+Root 和 Composite signing certificate 的三个 X.509 位置使用同一个 Composite
+OID，且 `parameters` 必须 ABSENT：
 
 ```text
 TBSCertificate.signature.algorithm
 Certificate.signatureAlgorithm.algorithm
 SubjectPublicKeyInfo.algorithm.algorithm
 ```
+
+TLCP encryption certificate 保持普通 SM2 SPKI；仅它的 TBS/outer signature
+AlgorithmIdentifier 使用 Composite OID。这是 subject key type 与 issuer
+certificate signature type 的有意解耦。
 
 公钥编码直接放在 SPKI 的单个 BIT STRING 中：
 
@@ -289,19 +322,72 @@ ClientKeyExchange: ML-KEM-768 ciphertext
 `draft-campagna-tls-bike-sike-hybrid`，本项目不声称符合该 draft，也不声称这是
 GM/T 正式定义的 PQKEX。
 
+## Experimental TLCP Hybrid Certificate
+
+相关 GmSSL 增量补丁位于：
+
+```text
+patches/gmssl/0002-integrate-tlcp-composite-certificate-verification.patch
+patches/gmssl/0003-verify-composite-signed-tlcp-encryption-certificate.patch
+```
+
+0002 必须在冻结的 0001 之后应用；0003 再提供实验 Composite certificate
+signature OID 的语法识别及 hybrid loader 的 cert[1] raw indexing。0003 不实现
+Composite 密码学验证。Composite ASN.1、签名组合与链验证仍只存在于
+主项目；`include/tlcp_hybrid_cert_adapter.h` 和
+`src/tlcp_hybrid_cert_adapter.c` 提供 raw-DER、无临时 PEM 文件的窄适配层。
+GmSSL 只接收 `VALID / INVALID / NOT_APPLICABLE`、详细日志结果以及已验证的
+65-byte SM2 component public key。
+
+```text
+tlcp_recv_server_certificate
+        |
+        +-- Composite -> adapter -> signing cert Dilithium2 AND SM2
+        |                         -> encryption cert Dilithium2 AND SM2
+        |                         -> encryption SPKI remains ordinary SM2
+        |                         -> VALID or fatal bad_certificate
+        |
+        +-- non-Composite, compatible mode -> original tls_cert_chain_verify
+```
+
+strict expected-hybrid 模式下，普通 SM2 signing certificate 被视为 downgrade 并
+终止；compatible 模式下 `NOT_APPLICABLE` 才允许进入原 GmSSL verifier。
+`INVALID` 永不 fallback。Composite SPKI 的 SM2 component 通过现有
+`composite_parse_public_key()` 路径取得，由 GmSSL 公开的 public-key import
+路径转换为 `SM2_KEY`，供原 TLCP ServerKeyExchange SM2 签名验证继续使用。
+
+第六阶段 B 的测试矩阵覆盖：cert[1] 普通 SM2 SPKI、Composite inner/outer
+signature OID、PQC marker、双组件严格 AND、GmSSL SM2 encryption key 提取及
+完整 Certificate/SKE 状态推进。负向用例分别覆盖 cert[1] Dilithium/SM2 签名
+篡改、marker 缺失、inner/outer OID 不一致、错误 CA 的任一组件、cert[0]/cert[1]
+任一无效、普通 SM2 CA 签名的 cert[1] downgrade，以及 encryption private key
+与 cert[1] SPKI 不匹配；握手失败映射为 fatal `bad_certificate`。普通双 SM2 TLCP
+仍由原路径处理并通过 GmSSL 回归测试。
+
+本阶段的安全语义是：
+
+```text
+Certificate-chain authentication:  SM2 + Dilithium2 strict Composite verification
+ServerKeyExchange proof-of-possession: existing TLCP SM2 signature
+```
+
+因此不声称 ServerKeyExchange 本身已经是 Composite 签名。PQKEX capability 与
+Hybrid Certificate 是两个独立实验开关；本补丁不传输 ML-KEM 数据，不修改
+master secret、PRF/KDF、Finished 或 record layer。
+
 验证 GmSSL 补丁时应使用临时 worktree，不污染固定 submodule。例如：
 
 ```sh
 gmssl_worktree="$(mktemp -d)"
 git -C third_party/GmSSL worktree add --detach "$gmssl_worktree" \
   24ae482701a7b124826c382fffc55c19f76d475d
-git -C "$gmssl_worktree" apply \
-  "$PWD/patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch"
+scripts/apply_gmssl_patches.sh "$gmssl_worktree"
 cmake -S "$gmssl_worktree" -B "$gmssl_worktree/build" \
   -DBUILD_SHARED_LIBS=OFF -DENABLE_QUIC=OFF -DENABLE_KYBER=OFF
 cmake --build "$gmssl_worktree/build" --target pqkextest gmssl-bin -j
 "$gmssl_worktree/build/bin/pqkextest"
 "$gmssl_worktree/build/bin/gmssl" pqkex_demo
+scripts/test_gmssl_hybrid_integration.sh "$gmssl_worktree/build"
 git -C third_party/GmSSL worktree remove "$gmssl_worktree"
 ```
 
@@ -331,23 +417,32 @@ ctest --test-dir build --output-on-failure
 
 口令只从环境变量读取，不放在命令行或日志中。首次运行生成并持久化四组互不
 复用的组件密钥；后续运行加载 key store，并在签发前验证 loaded CA/Server
-Hybrid key 与已有 Root/Server 证书 Composite SPKI 完全匹配：
+Hybrid key 与已有 Root/Server 证书 Composite SPKI 完全匹配；提供 encryption
+输出参数时还会持久化独立 SM2 encryption key，并核对其普通 SM2 SPKI：
 
 ```sh
 HYBRID_KEY_PASSPHRASE='use-a-strong-local-secret' \
   ./build/generate_demo_chain \
   certs/root_hybrid.crt certs/root_hybrid.der \
-  certs/server_hybrid.crt certs/server_hybrid.der
+  certs/server_hybrid.crt certs/server_hybrid.der \
+  certs/server_encryption.crt certs/server_encryption.der
 ```
 
-可选第 5 个参数指定其他 key root；默认是 `keys/`。文件布局：
+在四证书参数的兼容调用中第 5 个参数是可选 key root；提供 encryption PEM/DER
+时，最后一个参数是可选 key root。默认都是 `keys/`。文件布局：
 
 ```text
 keys/ca/sm2_private.pem
 keys/ca/dilithium2_private.enc
 keys/server/sm2_private.pem
 keys/server/dilithium2_private.enc
+keys/server-encryption/sm2_private.pem
 ```
+
+`server-encryption` 只保存独立 SM2 encryption private key，不生成或保存
+Dilithium subject key。其证书 SPKI 是 `id-ecPublicKey + sm2p256v1`，而 inner/outer
+signatureAlgorithm 和 signatureValue 使用实验 Composite CA signature。加载后
+逐字节核对 encryption certificate 的 SM2 SPKI，失配时失败关闭。
 
 SM2 使用 AES-256-CBC PBES2 加密 PKCS#8。Dilithium2 使用项目自描述的
 AES-256-GCM 认证加密容器，PBKDF2-HMAC-SHA256（200000 次）派生密钥，随机
@@ -384,6 +479,11 @@ cmake --build build-sanitize -j
 ASAN_OPTIONS=detect_leaks=0 \
   ctest --test-dir build-sanitize --output-on-failure
 ```
+
+主项目也可将 `detect_leaks` 设为 `1`，当前 12 项测试无泄漏。patched GmSSL
+集成测试启用 ASan 和 UBSan 时需对未修改的上游 SM4 `GETU32/S32` signed-shift
+报告使用 `-fno-sanitize=shift`；其余 UBSan 检查和 LeakSanitizer 保持启用。本项目
+不在 0003 中夹带修复该上游、非证书路径问题。
 
 ## 参考
 

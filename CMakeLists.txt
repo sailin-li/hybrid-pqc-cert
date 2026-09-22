@@ -80,7 +80,8 @@ add_library(hybrid_pqc
     src/hybrid_key_store.c
     src/hybrid_sign.c
     src/hybrid_x509.c
-    src/hybrid_chain.c)
+    src/hybrid_chain.c
+    src/tlcp_hybrid_cert_adapter.c)
 target_include_directories(hybrid_pqc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(hybrid_pqc PUBLIC OpenSSL::Crypto dilithium_ref)
 enable_project_warnings(hybrid_pqc)
@@ -99,7 +100,8 @@ foreach(test_name IN ITEMS dilithium sm2 hybrid_sign)
 endforeach()
 
 foreach(test_name IN ITEMS composite_key composite_message hybrid_key_store
-                           hybrid_x509 hybrid_chain)
+                           hybrid_x509 hybrid_chain hybrid_encryption_cert
+                           tlcp_hybrid_cert_adapter)
     add_executable(test_${test_name} tests/test_${test_name}.c)
     target_link_libraries(test_${test_name} PRIVATE hybrid_pqc)
     enable_project_warnings(test_${test_name})

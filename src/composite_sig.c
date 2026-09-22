@@ -192,8 +192,8 @@ int composite_sign(const HYBRID_PRIVATE_KEY *key,
                         sizeof(key->dilithium_secret_key),
                         m_prime, m_prime_len,
                         &dilithium_signature, &dilithium_signature_len) ||
-        !sm2_sign(key->sm2_private_key, m_prime, m_prime_len,
-                  &sm2_signature, &sm2_signature_len) ||
+        !hybrid_sm2_sign(key->sm2_private_key, m_prime, m_prime_len,
+                         &sm2_signature, &sm2_signature_len) ||
         !composite_serialize_signature(dilithium_signature,
                                        dilithium_signature_len,
                                        sm2_signature, sm2_signature_len,
@@ -240,8 +240,9 @@ int composite_verify_detailed(const HYBRID_PUBLIC_KEY *key,
                          sizeof(key->dilithium_public_key),
                          m_prime, m_prime_len,
                          dilithium_signature, dilithium_signature_len);
-    local.sm2_valid = sm2_verify(key->sm2_public_key, m_prime, m_prime_len,
-                                 sm2_signature, sm2_signature_len);
+    local.sm2_valid = hybrid_sm2_verify(
+        key->sm2_public_key, m_prime, m_prime_len,
+        sm2_signature, sm2_signature_len);
     local.composite_valid = local.dilithium_valid && local.sm2_valid;
 
 done:

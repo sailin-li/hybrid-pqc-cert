@@ -1,0 +1,55 @@
+diff --git a/include/gmssl/oid.h b/include/gmssl/oid.h
+index 70fde5e8..fd848963 100644
+--- a/include/gmssl/oid.h
++++ b/include/gmssl/oid.h
+@@ -183,6 +183,8 @@ enum {
+ 	OID_xmss_hashsig,
+ 	OID_xmssmt_hashsig,
+ 	OID_sphincs_hashsig, // OID not defined in RFC, so no oid[]
++	/* Project-private parser identifier; verification stays in the callback. */
++	OID_composite_sm2_dilithium_experimental,
+ 	OID_kyber_kem,
+ 
+ 	OID_aes192, // No OID
+diff --git a/src/x509_alg.c b/src/x509_alg.c
+index c8145fbc..f2748406 100644
+--- a/src/x509_alg.c
++++ b/src/x509_alg.c
+@@ -296,6 +296,10 @@ static uint32_t  oid_xmss_hashsig[] = { oid_alg, 34 };
+ static uint32_t  oid_xmssmt_hashsig[] = { oid_alg, 35 };
+ 
+ static uint32_t oid_sphincs_hashsig[] = { oid_nist_algs,3,20 }; // TODO: sphincs+ 128s with sha256, not officially defined
++/* RFC 5612 documentation PEN; experimental hybrid-pqc-cert use only. */
++static uint32_t oid_composite_sm2_dilithium_experimental[] = {
++	1,3,6,1,4,1,32473,1,1
++};
+ static uint32_t oid_kyber_kem[] = { oid_nist_algs,22,4 };
+ 
+ /*
+@@ -393,6 +397,10 @@ static const ASN1_OID_INFO x509_sign_algors[] = {
+ 	{ OID_xmssmt_hashsig, "xmssmt-hashsig", oid_xmssmt_hashsig, sizeof(oid_xmssmt_hashsig)/sizeof(int), 1 },
+ #endif
+ 	{ OID_sphincs_hashsig, "sphincs-hashsig", oid_sphincs_hashsig, sizeof(oid_sphincs_hashsig)/sizeof(int), 1 },
++	{ OID_composite_sm2_dilithium_experimental,
++	  "experimental-composite-sm2-dilithium",
++	  oid_composite_sm2_dilithium_experimental,
++	  sizeof(oid_composite_sm2_dilithium_experimental)/sizeof(int), 0 },
+ };
+ 
+ static const int x509_sign_algors_count =
+diff --git a/src/tls_cert.c b/src/tls_cert.c
+--- a/src/tls_cert.c
++++ b/src/tls_cert.c
+@@ -438,7 +438,11 @@ static int tlcp_ctx_add_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 		goto end;
+ 	}
+-	if (x509_certs_get_cert_by_index(certs, certslen, 1, &cert, &certlen) != 1
++	if ((hybrid_sign_cert
++		? tls_cert_chain_get_cert_by_index_raw(certs, certslen, 1,
++			&cert, &certlen)
++		: x509_certs_get_cert_by_index(certs, certslen, 1,
++			&cert, &certlen)) != 1
+ 		|| x509_cert_get_subject_public_key(cert, certlen, &public_key) != 1) {
+ 		error_print();
+ 		goto end;
+ 	}

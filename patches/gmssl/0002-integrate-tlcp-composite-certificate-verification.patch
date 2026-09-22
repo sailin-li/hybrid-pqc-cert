@@ -1,0 +1,447 @@
+diff --git a/include/gmssl/tls.h b/include/gmssl/tls.h
+index 4c0080df..811b9ec8 100644
+--- a/include/gmssl/tls.h
++++ b/include/gmssl/tls.h
+@@ -616,6 +616,8 @@ int tls_record_set_handshake_certificate(uint8_t *record, size_t *recordlen,
+ // see the impl of tls_record_get_handshake_certificate			
+ // a standalone cert-chain parsing function should be given			
+ int tls_record_get_handshake_certificate(const uint8_t *record, uint8_t *certs, size_t *certslen);
++int tls_cert_chain_get_cert_by_index_raw(const uint8_t *certs,
++	size_t certslen, int index, const uint8_t **cert, size_t *certlen);
+ 
+ // ServerKeyExchange
+ 
+@@ -816,6 +818,19 @@ enum {
+ 
+ #define TLS_MAX_CIPHER_SUITES	16
+ 
++#define TLCP_HYBRID_CERT_SM2_PUBLIC_KEY_SIZE 65
++
++enum {
++	GMSSL_TLCP_HYBRID_CERT_INVALID = -1,
++	GMSSL_TLCP_HYBRID_CERT_NOT_APPLICABLE = 0,
++	GMSSL_TLCP_HYBRID_CERT_VALID = 1,
++};
++
++typedef int (*TLS_TLCP_HYBRID_CERT_VERIFY_CB)(
++	const uint8_t *cert_chain, size_t cert_chain_len,
++	uint8_t sm2_public_key[TLCP_HYBRID_CERT_SM2_PUBLIC_KEY_SIZE],
++	void *arg, int verbose);
++
+ 
+ typedef struct {
+ 	int sig_alg;
+@@ -838,6 +853,11 @@ typedef struct {
+ 
+ 	int protocol;
+ 
++	/* Experimental TLCP Composite signing-certificate adapter. */
++	int tlcp_hybrid_cert_expected;
++	TLS_TLCP_HYBRID_CERT_VERIFY_CB tlcp_hybrid_cert_verify_cb;
++	void *tlcp_hybrid_cert_verify_arg;
++
+ 
+ 	int cipher_suites[TLS_MAX_CIPHER_SUITES];
+ 	size_t cipher_suites_cnt;
+@@ -1019,6 +1039,10 @@ int tlcp_ctx_add_client_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 	const char *keyfile, const char *keypass);
+ int tls_ctx_set_tlcp_server_certificate_and_keys(TLS_CTX *ctx, const char *chainfile,
+ 	const char *keyfile, const char *keypass);
++int tls_ctx_set_tlcp_hybrid_cert_verify(TLS_CTX *ctx, int expected_hybrid_cert,
++	TLS_TLCP_HYBRID_CERT_VERIFY_CB verify_cb, void *verify_arg);
++int tls_ctx_set_tlcp_hybrid_server_certificate_and_keys(TLS_CTX *ctx,
++	const char *chainfile, const char *keyfile, const char *keypass);
+ int tls_ctx_set_tlcp_client_certificate_and_keys(TLS_CTX *ctx, const char *chainfile,
+ 	const char *keyfile, const char *keypass);
+ void tls_ctx_cleanup(TLS_CTX *ctx);
+@@ -1044,7 +1068,7 @@ int tls13_ctx_set_key_update_seq_num_limit(TLS_CTX *ctx, size_t max_seq_num);
+ 
+ 
+ 
+-#define TLS_MAX_CERTIFICATES_SIZE	4096
++#define TLS_MAX_CERTIFICATES_SIZE	16384
+ #define TLS_DEFAULT_VERIFY_DEPTH	4
+ #define TLS_MAX_VERIFY_DEPTH		5
+ 
+@@ -1179,6 +1203,8 @@ typedef struct {
+ 
+ 	uint8_t peer_cert_chain[TLS_MAX_CERTIFICATES_SIZE];
+ 	size_t peer_cert_chain_len;
++	int tlcp_hybrid_sign_cert;
++	uint8_t tlcp_hybrid_sm2_public_key[TLCP_HYBRID_CERT_SM2_PUBLIC_KEY_SIZE];
+ 
+ 
+ 	X509_KEY server_enc_key;
+@@ -1578,6 +1604,7 @@ int tls_send_server_finished(TLS_CONNECT *conn);
+ 
+ int tlcp_send_client_hello(TLS_CONNECT *conn);
+ int tlcp_recv_client_hello(TLS_CONNECT *conn);
++int tlcp_recv_server_certificate(TLS_CONNECT *conn);
+ int tlcp_send_server_key_exchange(TLS_CONNECT *conn);
+ int tlcp_recv_server_key_exchange(TLS_CONNECT *conn);
+ int tlcp_generate_keys(TLS_CONNECT *conn);
+diff --git a/src/tlcp.c b/src/tlcp.c
+index c127ebfa..86b6fb30 100644
+--- a/src/tlcp.c
++++ b/src/tlcp.c
+@@ -264,6 +264,13 @@ int tlcp_record_set_handshake_server_key_exchange(uint8_t *record, size_t *recor
+ 	return 1;
+ }
+ 
++int tlcp_record_set_handshake_server_key_exchange_ecc(uint8_t *record,
++	size_t *recordlen, const uint8_t *sig, size_t siglen)
++{
++	return tlcp_record_set_handshake_server_key_exchange(record, recordlen,
++		TLS_server_key_exchange_ecc, NULL, 0, sig, siglen);
++}
++
+ int tlcp_record_get_handshake_server_key_exchange(const uint8_t *record,
+ 	int server_key_exchange_alg, const uint8_t **server_ecdh_params, size_t *server_ecdh_params_len,
+ 	const uint8_t **sig, size_t *siglen)
+@@ -859,8 +866,11 @@ int tlcp_recv_server_hello(TLS_CONNECT *conn)
+ int tlcp_recv_server_certificate(TLS_CONNECT *conn)
+ {
+ 	int ret;
++	int hybrid_ret = GMSSL_TLCP_HYBRID_CERT_NOT_APPLICABLE;
+ 	int verify_result = X509_verify_ok;
+ 	int sig_alg = 0;
++	const uint8_t *sign_cert = NULL;
++	size_t sign_cert_len = 0;
+ 
+ 	if ((ret = tls_recv_record(conn)) != 1) {
+ 		if (ret != TLS_ERROR_RECV_AGAIN) {
+@@ -897,7 +907,39 @@ int tlcp_recv_server_certificate(TLS_CONNECT *conn)
+ 		tls_send_alert(conn, TLS_alert_unexpected_message);
+ 		return -1;
+ 	}
+-	if (tls_cert_chain_verify(conn->protocol, X509_cert_chain_server, conn->cipher_suite,
++	conn->tlcp_hybrid_sign_cert = 0;
++	memset(conn->tlcp_hybrid_sm2_public_key, 0,
++		sizeof(conn->tlcp_hybrid_sm2_public_key));
++	if (conn->ctx->tlcp_hybrid_cert_verify_cb) {
++		if (tls_cert_chain_get_cert_by_index_raw(conn->peer_cert_chain,
++			conn->peer_cert_chain_len, 0, &sign_cert, &sign_cert_len) != 1) {
++			error_print();
++			tls_send_alert(conn, TLS_alert_bad_certificate);
++			return -1;
++		}
++		hybrid_ret = conn->ctx->tlcp_hybrid_cert_verify_cb(
++			conn->peer_cert_chain, conn->peer_cert_chain_len,
++			conn->tlcp_hybrid_sm2_public_key,
++			conn->ctx->tlcp_hybrid_cert_verify_arg, conn->verbose);
++		if (hybrid_ret == GMSSL_TLCP_HYBRID_CERT_INVALID
++			|| (hybrid_ret == GMSSL_TLCP_HYBRID_CERT_NOT_APPLICABLE
++				&& conn->ctx->tlcp_hybrid_cert_expected)) {
++			error_print();
++			conn->verify_result = X509_verify_err_certificate;
++			tls_send_alert(conn, TLS_alert_bad_certificate);
++			return -1;
++		}
++		if (hybrid_ret == GMSSL_TLCP_HYBRID_CERT_VALID) {
++			conn->tlcp_hybrid_sign_cert = 1;
++			verify_result = X509_verify_ok;
++			sig_alg = TLS_sig_sm2sig_sm3;
++			if (conn->verbose) {
++				tls_trace("Hybrid signing certificate detected and strictly verified\n");
++			}
++		}
++	}
++	if (hybrid_ret == GMSSL_TLCP_HYBRID_CERT_NOT_APPLICABLE
++		&& tls_cert_chain_verify(conn->protocol, X509_cert_chain_server, conn->cipher_suite,
+ 		conn->ctx->cacertslen ? 1 : 0,
+ 		conn->peer_cert_chain, conn->peer_cert_chain_len,
+ 		conn->ctx->cacerts, conn->ctx->cacertslen,
+@@ -974,8 +1016,25 @@ int tlcp_recv_server_key_exchange(TLS_CONNECT *conn)
+ 	}
+ 
+ 	// verify ServerKeyExchange
+-	if (x509_certs_get_cert_by_index(conn->peer_cert_chain, conn->peer_cert_chain_len, 0, &sign_cert, &sign_cert_len) != 1
+-		|| x509_cert_get_subject_public_key(sign_cert, sign_cert_len, &sign_key) != 1) {
++	if (tls_cert_chain_get_cert_by_index_raw(conn->peer_cert_chain, conn->peer_cert_chain_len, 0, &sign_cert, &sign_cert_len) != 1) {
++		error_print();
++		return -1;
++	}
++	if (conn->tlcp_hybrid_sign_cert) {
++		const uint8_t *public_key = conn->tlcp_hybrid_sm2_public_key;
++		size_t public_key_len = sizeof(conn->tlcp_hybrid_sm2_public_key);
++
++		memset(&sign_key, 0, sizeof(sign_key));
++		if (x509_public_key_from_bytes(&sign_key, OID_ec_public_key, OID_sm2,
++			&public_key, &public_key_len) != 1 || public_key_len != 0) {
++			error_print();
++			tls_send_alert(conn, TLS_alert_bad_certificate);
++			return -1;
++		}
++		if (conn->verbose) {
++			tls_trace("ServerKeyExchange uses verified Composite SM2 component\n");
++		}
++	} else if (x509_cert_get_subject_public_key(sign_cert, sign_cert_len, &sign_key) != 1) {
+ 		error_print();
+ 		return -1;
+ 	}
+@@ -1035,7 +1094,7 @@ int tlcp_recv_server_key_exchange(TLS_CONNECT *conn)
+ 			tls_send_alert(conn, TLS_alert_unexpected_message);
+ 			return -1;
+ 		}
+-		if (x509_certs_get_cert_by_index(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
++		if (tls_cert_chain_get_cert_by_index_raw(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
+ 			&enc_cert, &enc_cert_len) != 1) {
+ 			error_print();
+ 			return -1;
+@@ -1171,7 +1230,7 @@ int tlcp_send_client_key_exchange(TLS_CONNECT *conn)
+ 				tls_send_alert(conn, TLS_alert_internal_error);
+ 				return -1;
+ 			}
+-			if (x509_certs_get_cert_by_index(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
++			if (tls_cert_chain_get_cert_by_index_raw(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
+ 				&enc_cert, &enc_cert_len) != 1
+ 				|| x509_cert_get_subject_public_key(enc_cert, enc_cert_len, &public_key) != 1) {
+ 				error_print();
+@@ -1215,7 +1274,7 @@ int tlcp_send_client_key_exchange(TLS_CONNECT *conn)
+ 				return -1;
+ 			}
+ 		} else if (tlcp_cipher_suite_is_ecc(conn->cipher_suite)) {
+-			if (x509_certs_get_cert_by_index(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
++			if (tls_cert_chain_get_cert_by_index_raw(conn->peer_cert_chain, conn->peer_cert_chain_len, 1,
+ 				&enc_cert, &enc_cert_len) != 1
+ 				|| x509_cert_get_subject_public_key(enc_cert, enc_cert_len, &public_key) != 1) {
+ 				error_print();
+diff --git a/src/tls.c b/src/tls.c
+index d5c5e371..c5f7bc1c 100644
+--- a/src/tls.c
++++ b/src/tls.c
+@@ -1706,6 +1706,41 @@ int tls_record_get_handshake_server_hello(const uint8_t *record,
+ 	return 1;
+ }
+ 
++static int tls_raw_certificate_from_der(const uint8_t **cert, size_t *certlen,
++	const uint8_t **in, size_t *inlen)
++{
++	if (!cert || !certlen || !in || !*in || !inlen || !*inlen
++		|| **in != ASN1_TAG_SEQUENCE
++		|| asn1_any_from_der(cert, certlen, in, inlen) != 1) {
++		error_print();
++		return -1;
++	}
++	return 1;
++}
++
++int tls_cert_chain_get_cert_by_index_raw(const uint8_t *certs,
++	size_t certslen, int index, const uint8_t **cert, size_t *certlen)
++{
++	int current = 0;
++
++	if (!certs || !certslen || index < 0 || !cert || !certlen) {
++		error_print();
++		return -1;
++	}
++	while (certslen) {
++		if (tls_raw_certificate_from_der(cert, certlen,
++			&certs, &certslen) != 1) {
++			return -1;
++		}
++		if (current++ == index) {
++			return 1;
++		}
++	}
++	*cert = NULL;
++	*certlen = 0;
++	return 0;
++}
++
+ int tls_record_set_handshake_certificate(uint8_t *record, size_t *recordlen,
+ 	const uint8_t *certs, size_t certslen)
+ {
+@@ -1728,7 +1763,8 @@ int tls_record_set_handshake_certificate(uint8_t *record, size_t *recordlen,
+ 		const uint8_t *cert;
+ 		size_t certlen;
+ 
+-		if (x509_cert_from_der(&cert, &certlen, &certs, &certslen) != 1) {
++		if (tls_raw_certificate_from_der(&cert, &certlen,
++			&certs, &certslen) != 1) {
+ 			error_print();
+ 			return -1;
+ 		}
+@@ -1782,9 +1818,9 @@ int tls_record_get_handshake_certificate(const uint8_t *record, uint8_t *certs,
+ 			error_print();
+ 			return -1;
+ 		}
+-		if (x509_cert_from_der(&cert, &certlen, &a, &alen) != 1
++		if (tls_raw_certificate_from_der(&cert, &certlen, &a, &alen) != 1
+ 			|| asn1_length_is_zero(alen) != 1
+-			|| x509_cert_to_der(cert, certlen, &certs, certslen) != 1) {
++			|| asn1_any_to_der(cert, certlen, &certs, certslen) != 1) {
+ 			error_print();
+ 			return -1;
+ 		}
+diff --git a/src/tls_cert.c b/src/tls_cert.c
+index 47735744..0e665605 100644
+--- a/src/tls_cert.c
++++ b/src/tls_cert.c
+@@ -287,8 +287,45 @@ int tls_ctx_set_certificate_and_key(TLS_CTX *ctx, const char *chainfile,
+ 	return 1;
+ }
+ 
++static int tlcp_hybrid_certs_from_pem(uint8_t *certs, size_t *certslen,
++	size_t maxlen, FILE *fp)
++{
++	int ret;
++	size_t certlen;
++
++	*certslen = 0;
++	for (;;) {
++		const uint8_t *cursor;
++		size_t remaining;
++		const uint8_t *certificate;
++		size_t certificate_len;
++
++		ret = pem_read(fp, "CERTIFICATE", certs, &certlen, maxlen);
++		if (ret < 0) {
++			error_print();
++			return -1;
++		}
++		if (ret == 0) {
++			break;
++		}
++		cursor = certs;
++		remaining = certlen;
++		if (remaining == 0 || *cursor != ASN1_TAG_SEQUENCE
++			|| asn1_any_from_der(&certificate, &certificate_len,
++				&cursor, &remaining) != 1
++			|| remaining != 0) {
++			error_print();
++			return -1;
++		}
++		certs += certlen;
++		*certslen += certlen;
++		maxlen -= certlen;
++	}
++	return *certslen ? 1 : 0;
++}
++
+ static int tlcp_ctx_add_certificate_and_keys(TLS_CTX *ctx, const char *chainfile,
+-	const char *keyfile, const char *keypass)
++	const char *keyfile, const char *keypass, int hybrid_sign_cert)
+ {
+ 	int ret = -1;
+ 	const int algor = OID_ec_public_key;
+@@ -304,6 +341,9 @@ static int tlcp_ctx_add_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 	const uint8_t *cert;
+ 	size_t certlen;
+ 	X509_KEY public_key;
++	uint8_t hybrid_sm2_public_key[TLCP_HYBRID_CERT_SM2_PUBLIC_KEY_SIZE];
++	const uint8_t *hybrid_sm2_public_key_ptr;
++	size_t hybrid_sm2_public_key_len;
+ 
+ 
+ 	if (!ctx || !chainfile || !keyfile || !keypass) {
+@@ -334,12 +374,13 @@ static int tlcp_ctx_add_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 	}
+ 	cert_chain = ctx->cert_chains + ctx->cert_chains_len;
+ 	certs = cert_chain + tls_uint24_size();
+-	if (x509_certs_from_pem(certs, &certslen,
++	if ((hybrid_sign_cert ? tlcp_hybrid_certs_from_pem : x509_certs_from_pem)(
++		certs, &certslen,
+ 		sizeof(ctx->cert_chains) - ctx->cert_chains_len - tls_uint24_size(), certfp) != 1) {
+ 		error_print();
+ 		goto end;
+ 	}
+-	if (tlcp_cert_chain_check_order(certs, certslen) != 1) {
++	if (!hybrid_sign_cert && tlcp_cert_chain_check_order(certs, certslen) != 1) {
+ 		error_print();
+ 		goto end;
+ 	}
+@@ -356,8 +397,33 @@ static int tlcp_ctx_add_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 		error_print();
+ 		goto end;
+ 	}
+-	if (x509_certs_get_cert_by_index(certs, certslen, 0, &cert, &certlen) != 1
+-		|| x509_cert_get_subject_public_key(cert, certlen, &public_key) != 1) {
++	if ((hybrid_sign_cert
++		? tls_cert_chain_get_cert_by_index_raw(certs, certslen, 0,
++			&cert, &certlen)
++		: x509_certs_get_cert_by_index(certs, certslen, 0,
++			&cert, &certlen)) != 1) {
++		error_print();
++		goto end;
++	}
++	if (hybrid_sign_cert) {
++		if (!ctx->tlcp_hybrid_cert_verify_cb
++			|| ctx->tlcp_hybrid_cert_verify_cb(certs, certslen,
++				hybrid_sm2_public_key,
++				ctx->tlcp_hybrid_cert_verify_arg, ctx->verbose)
++				!= GMSSL_TLCP_HYBRID_CERT_VALID) {
++			error_print();
++			goto end;
++		}
++		hybrid_sm2_public_key_ptr = hybrid_sm2_public_key;
++		hybrid_sm2_public_key_len = sizeof(hybrid_sm2_public_key);
++		memset(&public_key, 0, sizeof(public_key));
++		if (x509_public_key_from_bytes(&public_key, algor, algor_param,
++			&hybrid_sm2_public_key_ptr, &hybrid_sm2_public_key_len) != 1
++			|| hybrid_sm2_public_key_len != 0) {
++			error_print();
++			goto end;
++		}
++	} else if (x509_cert_get_subject_public_key(cert, certlen, &public_key) != 1) {
+ 		error_print();
+ 		goto end;
+ 	}
+@@ -404,7 +470,7 @@ int tlcp_ctx_add_server_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 		error_print();
+ 		return -1;
+ 	}
+-	if (tlcp_ctx_add_certificate_and_keys(ctx, chainfile, keyfile, keypass) != 1) {
++	if (tlcp_ctx_add_certificate_and_keys(ctx, chainfile, keyfile, keypass, 0) != 1) {
+ 		error_print();
+ 		return -1;
+ 	}
+@@ -418,7 +484,7 @@ int tlcp_ctx_add_client_certificate_and_keys(TLS_CTX *ctx, const char *chainfile
+ 		error_print();
+ 		return -1;
+ 	}
+-	if (tlcp_ctx_add_certificate_and_keys(ctx, chainfile, keyfile, keypass) != 1) {
++	if (tlcp_ctx_add_certificate_and_keys(ctx, chainfile, keyfile, keypass, 0) != 1) {
+ 		error_print();
+ 		return -1;
+ 	}
+@@ -440,6 +506,34 @@ int tls_ctx_set_tlcp_server_certificate_and_keys(TLS_CTX *ctx, const char *chain
+ 	return 1;
+ }
+ 
++int tls_ctx_set_tlcp_hybrid_cert_verify(TLS_CTX *ctx, int expected_hybrid_cert,
++	TLS_TLCP_HYBRID_CERT_VERIFY_CB verify_cb, void *verify_arg)
++{
++	if (!ctx || ctx->protocol != TLS_protocol_tlcp || !verify_cb) {
++		error_print();
++		return -1;
++	}
++	ctx->tlcp_hybrid_cert_expected = expected_hybrid_cert ? 1 : 0;
++	ctx->tlcp_hybrid_cert_verify_cb = verify_cb;
++	ctx->tlcp_hybrid_cert_verify_arg = verify_arg;
++	return 1;
++}
++
++int tls_ctx_set_tlcp_hybrid_server_certificate_and_keys(TLS_CTX *ctx,
++	const char *chainfile, const char *keyfile, const char *keypass)
++{
++	if (!ctx || ctx->is_client || ctx->cert_chains_len || ctx->x509_keys_cnt
++		|| !ctx->tlcp_hybrid_cert_verify_cb) {
++		error_print();
++		return -1;
++	}
++	if (tlcp_ctx_add_certificate_and_keys(ctx, chainfile, keyfile, keypass, 1) != 1) {
++		error_print();
++		return -1;
++	}
++	return 1;
++}
++
+ int tls_ctx_set_tlcp_client_certificate_and_keys(TLS_CTX *ctx, const char *chainfile,
+ 	const char *keyfile, const char *keypass)
+ {
+@@ -626,4 +720,3 @@ int tls12_cert_chains_select(const uint8_t *cert_chains, size_t cert_chains_len,
+ 
+ 	return 0;
+ }
+-

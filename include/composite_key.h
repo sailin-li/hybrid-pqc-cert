@@ -38,4 +38,8 @@ int composite_parse_public_key(const uint8_t *serialized,
                                size_t serialized_len,
                                HYBRID_PUBLIC_KEY *key);
 
+int composite_get_sm2_public_key_octets(
+    const HYBRID_PUBLIC_KEY *key,
+    uint8_t output[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES]);
+
 #endif

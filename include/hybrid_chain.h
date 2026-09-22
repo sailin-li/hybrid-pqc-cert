@@ -13,6 +13,8 @@ typedef struct {
     int key_identifiers_valid;
     int pqc_extension_present;
     int composite_oids_valid;
+    int subject_public_key_composite;
+    int subject_public_key_sm2;
     int composite_public_key_valid;
     int signature_format_valid;
     int dilithium_valid;
@@ -33,6 +35,10 @@ int hybrid_verify_root_self_signature(X509 *root,
 
 int hybrid_verify_certificate(X509 *certificate, X509 *issuer_certificate,
                               HYBRID_CERT_VERIFY_RESULT *result);
+
+int hybrid_verify_encryption_certificate(
+    X509 *certificate, X509 *issuer_certificate,
+    HYBRID_CERT_VERIFY_RESULT *result);
 
 int hybrid_verify_chain(X509 *root, X509 *server,
                         HYBRID_CHAIN_VERIFY_RESULT *result);

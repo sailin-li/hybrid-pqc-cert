@@ -129,6 +129,25 @@ done:
     return result;
 }
 
+HYBRID_KEY_STORE_STATUS hybrid_sm2_key_store_status(const char *directory)
+{
+    char *sm2_path = join_path(directory, HYBRID_SM2_PRIVATE_KEY_FILE);
+    HYBRID_KEY_STORE_STATUS result = HYBRID_KEY_STORE_INCOMPLETE;
+
+    if (sm2_path == NULL) {
+        return result;
+    }
+    if (access(sm2_path, F_OK) != 0) {
+        result = errno == ENOENT ? HYBRID_KEY_STORE_MISSING
+                                 : HYBRID_KEY_STORE_INCOMPLETE;
+    } else if (ensure_private_directory(directory) &&
+               secure_regular_file(sm2_path, -1)) {
+        result = HYBRID_KEY_STORE_COMPLETE;
+    }
+    OPENSSL_free(sm2_path);
+    return result;
+}
+
 static void put_u32_be(unsigned char output[4], uint32_t value)
 {
     output[0] = (unsigned char)(value >> 24);
@@ -271,6 +290,46 @@ static EVP_PKEY *load_sm2_private_key(const char *path,
     }
     EVP_PKEY_CTX_free(check_context);
     return private_key;
+}
+
+int hybrid_sm2_key_store_save(const char *directory,
+                              EVP_PKEY *private_key,
+                              const char *passphrase)
+{
+    char *path = NULL;
+    int ok = 0;
+
+    if (directory == NULL || private_key == NULL ||
+        !EVP_PKEY_is_a(private_key, "SM2") ||
+        !passphrase_valid(passphrase) ||
+        hybrid_sm2_key_store_status(directory) != HYBRID_KEY_STORE_MISSING ||
+        !ensure_private_directory(directory)) {
+        return 0;
+    }
+    path = join_path(directory, HYBRID_SM2_PRIVATE_KEY_FILE);
+    if (path != NULL && save_sm2_private_key(path, private_key, passphrase)) {
+        ok = 1;
+    }
+    OPENSSL_free(path);
+    return ok;
+}
+
+EVP_PKEY *hybrid_sm2_key_store_load(const char *directory,
+                                    const char *passphrase)
+{
+    char *path = NULL;
+    EVP_PKEY *key = NULL;
+
+    if (hybrid_sm2_key_store_status(directory) != HYBRID_KEY_STORE_COMPLETE ||
+        !passphrase_valid(passphrase)) {
+        return NULL;
+    }
+    path = join_path(directory, HYBRID_SM2_PRIVATE_KEY_FILE);
+    if (path != NULL) {
+        key = load_sm2_private_key(path, passphrase);
+    }
+    OPENSSL_free(path);
+    return key;
 }
 
 static int encrypt_dilithium_payload(

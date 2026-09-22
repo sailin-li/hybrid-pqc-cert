@@ -60,6 +60,34 @@ static int certificate_constraints_valid(const X509 *certificate, int is_ca)
     return basic_valid && usage_valid;
 }
 
+static int encryption_certificate_constraints_valid(
+    const X509 *certificate)
+{
+    BASIC_CONSTRAINTS *constraints = NULL;
+    ASN1_BIT_STRING *usage = NULL;
+    int critical = -1;
+    int basic_valid = 0;
+    int usage_valid = 0;
+
+    constraints = X509_get_ext_d2i(certificate, NID_basic_constraints,
+                                   &critical, NULL);
+    if (constraints != NULL && critical == 1 && !constraints->ca) {
+        basic_valid = 1;
+    }
+    BASIC_CONSTRAINTS_free(constraints);
+    critical = -1;
+    usage = X509_get_ext_d2i(certificate, NID_key_usage, &critical, NULL);
+    if (usage != NULL && critical == 1) {
+        usage_valid = !ASN1_BIT_STRING_get_bit(usage, 0) &&
+                      ASN1_BIT_STRING_get_bit(usage, 2) &&
+                      ASN1_BIT_STRING_get_bit(usage, 4) &&
+                      !ASN1_BIT_STRING_get_bit(usage, 5) &&
+                      !ASN1_BIT_STRING_get_bit(usage, 6);
+    }
+    ASN1_BIT_STRING_free(usage);
+    return basic_valid && usage_valid;
+}
+
 static int server_eku_valid(const X509 *certificate)
 {
     EXTENDED_KEY_USAGE *usage = NULL;
@@ -195,7 +223,9 @@ int hybrid_verify_root_self_signature(X509 *root,
     local.key_identifiers_valid = subject_key_identifier_present(root);
     local.pqc_extension_present = hybrid_x509_has_pqc_extension(root);
     local.composite_oids_valid =
-        hybrid_x509_composite_algorithms_valid(root);
+        hybrid_x509_composite_signature_algorithms_valid(root);
+    local.subject_public_key_composite =
+        hybrid_x509_subject_public_key_is_composite(root);
     local.composite_public_key_valid =
         hybrid_x509_get_composite_public_key(root, &root_key);
     if (local.composite_public_key_valid) {
@@ -205,6 +235,7 @@ int hybrid_verify_root_self_signature(X509 *root,
         local.issuer_subject_link_valid && local.validity_valid &&
         local.issuer_ca_constraints_valid && local.pqc_extension_present &&
         local.key_identifiers_valid && local.composite_oids_valid &&
+        local.subject_public_key_composite &&
         local.composite_public_key_valid && local.composite_valid;
 
 done:
@@ -240,7 +271,9 @@ int hybrid_verify_certificate(X509 *certificate, X509 *issuer_certificate,
     local.pqc_extension_present =
         hybrid_x509_has_pqc_extension(certificate);
     local.composite_oids_valid =
-        hybrid_x509_composite_algorithms_valid(certificate);
+        hybrid_x509_composite_signature_algorithms_valid(certificate);
+    local.subject_public_key_composite =
+        hybrid_x509_subject_public_key_is_composite(certificate);
     local.composite_public_key_valid =
         hybrid_x509_get_composite_public_key(issuer_certificate, &issuer_key);
     if (local.composite_public_key_valid) {
@@ -252,6 +285,57 @@ int hybrid_verify_certificate(X509 *certificate, X509 *issuer_certificate,
         local.subject_constraints_valid && local.eku_valid && local.san_valid &&
         local.key_identifiers_valid && local.pqc_extension_present &&
         local.composite_oids_valid &&
+        local.subject_public_key_composite &&
+        local.composite_public_key_valid && local.composite_valid;
+
+done:
+    hybrid_public_key_cleanup(&issuer_key);
+    if (result != NULL) {
+        *result = local;
+    }
+    return local.certificate_valid;
+}
+
+int hybrid_verify_encryption_certificate(
+    X509 *certificate, X509 *issuer_certificate,
+    HYBRID_CERT_VERIFY_RESULT *result)
+{
+    HYBRID_CERT_VERIFY_RESULT local = {0};
+    HYBRID_PUBLIC_KEY issuer_key;
+
+    hybrid_public_key_init(&issuer_key);
+    if (certificate == NULL || issuer_certificate == NULL) {
+        goto done;
+    }
+    local.issuer_subject_link_valid =
+        X509_NAME_cmp(X509_get_issuer_name(certificate),
+                      X509_get_subject_name(issuer_certificate)) == 0;
+    local.validity_valid = certificate_time_valid(certificate);
+    local.issuer_ca_constraints_valid =
+        certificate_constraints_valid(issuer_certificate, 1);
+    local.subject_constraints_valid =
+        encryption_certificate_constraints_valid(certificate);
+    local.eku_valid = 1;
+    local.san_valid = 1;
+    local.key_identifiers_valid =
+        server_key_identifiers_valid(certificate, issuer_certificate);
+    local.pqc_extension_present =
+        hybrid_x509_has_pqc_extension(certificate);
+    local.composite_oids_valid =
+        hybrid_x509_composite_signature_algorithms_valid(certificate);
+    local.subject_public_key_sm2 =
+        hybrid_x509_subject_public_key_is_sm2(certificate);
+    local.composite_public_key_valid =
+        hybrid_x509_get_composite_public_key(issuer_certificate, &issuer_key);
+    if (local.composite_public_key_valid) {
+        (void)verify_certificate_signature(certificate, &issuer_key, &local);
+    }
+    local.certificate_valid =
+        local.issuer_subject_link_valid && local.validity_valid &&
+        local.issuer_ca_constraints_valid &&
+        local.subject_constraints_valid && local.key_identifiers_valid &&
+        local.pqc_extension_present && local.composite_oids_valid &&
+        local.subject_public_key_sm2 &&
         local.composite_public_key_valid && local.composite_valid;
 
 done:

@@ -53,7 +53,7 @@ int composite_key_generate(HYBRID_PRIVATE_KEY *private_key,
     }
     hybrid_private_key_init(&generated_private);
     hybrid_public_key_init(&generated_public);
-    generated_private.sm2_private_key = sm2_generate_keypair();
+    generated_private.sm2_private_key = hybrid_sm2_generate_keypair();
     if (generated_private.sm2_private_key == NULL ||
         !EVP_PKEY_up_ref(generated_private.sm2_private_key)) {
         goto error;
@@ -181,4 +181,14 @@ int composite_parse_public_key(const uint8_t *serialized,
     hybrid_public_key_cleanup(key);
     *key = parsed;
     return 1;
+}
+
+int composite_get_sm2_public_key_octets(
+    const HYBRID_PUBLIC_KEY *key,
+    uint8_t output[SM2_UNCOMPRESSED_PUBLIC_KEY_BYTES])
+{
+    if (key == NULL || output == NULL) {
+        return 0;
+    }
+    return serialize_sm2_public_key(key->sm2_public_key, output);
 }

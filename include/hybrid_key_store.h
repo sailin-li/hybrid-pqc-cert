@@ -14,6 +14,7 @@ typedef enum {
 } HYBRID_KEY_STORE_STATUS;
 
 HYBRID_KEY_STORE_STATUS hybrid_key_store_status(const char *directory);
+HYBRID_KEY_STORE_STATUS hybrid_sm2_key_store_status(const char *directory);
 
 int hybrid_key_store_save(const char *directory,
                           const HYBRID_PRIVATE_KEY *private_key,
@@ -24,6 +25,12 @@ int hybrid_key_store_load(const char *directory,
                           const char *passphrase,
                           HYBRID_PRIVATE_KEY *private_key,
                           HYBRID_PUBLIC_KEY *public_key);
+
+int hybrid_sm2_key_store_save(const char *directory,
+                              EVP_PKEY *private_key,
+                              const char *passphrase);
+EVP_PKEY *hybrid_sm2_key_store_load(const char *directory,
+                                    const char *passphrase);
 
 int composite_public_keys_equal(const HYBRID_PUBLIC_KEY *left,
                                 const HYBRID_PUBLIC_KEY *right);
