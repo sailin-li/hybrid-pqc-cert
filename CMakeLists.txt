@@ -133,3 +133,16 @@ enable_project_warnings(inspect_hybrid_cert)
 add_executable(mlkem_demo tools/mlkem_demo.c)
 target_link_libraries(mlkem_demo PRIVATE mlkem)
 enable_project_warnings(mlkem_demo)
+
+add_executable(benchmark_composite_verify tools/benchmark_composite_verify.c)
+target_link_libraries(benchmark_composite_verify PRIVATE hybrid_pqc)
+if(CMAKE_BUILD_TYPE)
+    target_compile_definitions(benchmark_composite_verify PRIVATE
+        HYBRID_BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+else()
+    target_compile_definitions(benchmark_composite_verify PRIVATE
+        HYBRID_BENCH_BUILD_TYPE="unspecified")
+endif()
+enable_project_warnings(benchmark_composite_verify)
+add_test(NAME benchmark_smoke COMMAND benchmark_composite_verify
+         --warmup 1 --iterations 10)

@@ -52,7 +52,7 @@ ClientHello capability advertisement 和 server-side KEM selection。
    6A. TLCP Composite signing certificate           ✅
    6B. TLCP encryption certificate Composite-sign   ✅
 7. TLS 1.3 PQ-PSK extension                        ⬜
-8. 性能 < 50 ms                                     ⬜
+8. 性能 < 50 ms                                     ✅
 9. QROM 安全论证                                    ⬜
 10. 经典/量子侧信道防护方案                           ⬜
 ```
@@ -484,6 +484,50 @@ ASAN_OPTIONS=detect_leaks=0 \
 集成测试启用 ASan 和 UBSan 时需对未修改的上游 SM4 `GETU32/S32` signed-shift
 报告使用 `-fno-sanitize=shift`；其余 UBSan 检查和 LeakSanitizer 保持启用。本项目
 不在 0003 中夹带修复该上游、非证书路径问题。
+
+## Performance Benchmark
+
+课题的主要性能验收指标是公开 `composite_verify()` 的平均验证时间严格小于
+`50 ms`。`ECDSA-P256-SHA256`（NIST P-256 / `prime256v1` / `secp256r1` 与
+SHA-256）只作为性能 baseline，不会替换项目实际使用的 SM2 +
+CRYSTALS-Dilithium2。
+
+独立 target `benchmark_composite_verify` 使用确定性的 1024-byte raw message
+（`message[i] = i & 0xff`）测量以下四项：
+
+- ECDSA-P256-SHA256 Verify；
+- SM2-SM3 Verify；
+- CRYSTALS-Dilithium2 Verify；
+- SM2 + Dilithium2 Composite Verify。
+
+Composite 项直接调用完整的 `composite_verify()`，因此计入 signature parsing、
+`composite_build_message()`、SM3 pre-hash、Dilithium2 verify、SM2 verify 和严格
+AND 结果。计时区不包含 key generation、signing、证书生成、key store、磁盘
+I/O、随机数生成、benchmark 初始化或 OpenSSL provider/library 初始化，也不包含
+证书解析、路径验证和 TLCP 握手。
+
+正式数据必须使用同一个 Release 配置构建全部四项：
+
+```sh
+cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release
+cmake --build build-bench -j
+taskset -c 2 \
+  ./build-bench/benchmark_composite_verify \
+    --warmup 1000 \
+    --iterations 10000 \
+    --csv artifacts/composite_verify_benchmark.csv
+```
+
+`taskset` 是可选项；不可用时直接运行即可。`--csv` 同时生成同路径、同 basename
+的 `.md` 汇总。输出包括 count、mean、p50、p95、p99、min、max、相对 P-256
+比例、Composite 相对 baseline 的耗时差，以及近似 framework overhead。正式 PPT
+建议至少 10,000 次 timed iterations，并连续运行三次；应使用预先约定的代表运行
+或三次均值，不应只选择最快的一次。CPU 型号还可以用 `lscpu` 留档。
+
+普通 CTest 中的 `benchmark_smoke` 只运行 10 次以确认 executable 和四条验证路径
+工作正常；它不会把 50 ms 设为跨机器的硬性时间 gate。Sanitizer builds are for
+correctness/security testing, not performance measurement；ASan、UBSan 或 Debug
+`-O0` 的结果不能作为正式性能数据。
 
 ## 参考
 

@@ -4,9 +4,11 @@
 
 项目名：`hybrid-pqc-cert`，课题 5“国密证书支持抗量子算法方案设计”。
 
-当前已完成证书层、TLCP Certificate 握手接入和独立 KEM primitive：实验性 SM2 +
-CRYSTALS-Dilithium2 Composite Signature、Root Hybrid CA、Root 签发 Server、
-两级链与严格双验证，以及 FIPS 203 ML-KEM-768 KeyGen/Encaps/Decaps。不要把
+当前已完成证书层、TLCP Certificate 握手接入、独立 KEM primitive 和验证性能
+benchmark：实验性 SM2 + CRYSTALS-Dilithium2 Composite Signature、Root Hybrid
+CA、Root 签发 Server、两级链与严格双验证、FIPS 203 ML-KEM-768
+KeyGen/Encaps/Decaps，以及以 ECDSA-P256-SHA256 为 baseline 的完整
+`composite_verify()` 测量。不要把
 ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP 握手、TLS
 握手或 `post-quantum_pre_shared_key`，除非后续任务明确要求。当前 PQKEX 只
 实现 ClientHello capability extension 编解码和 KEM 选择；TLCP Certificate
@@ -53,6 +55,9 @@ certificate 分别执行严格双验证，但 ServerKeyExchange 仍为原有 SM2
   与 cert[1] 都必须 `DilithiumValid && SM2Valid` 才接受 Certificate message。
 - Certificate-chain authentication 是 SM2 + Dilithium2 strict AND；当前
   ServerKeyExchange proof-of-possession 仍是原 TLCP SM2 signature。
+- `benchmark_composite_verify` 使用统一 1024-byte message，分别测量
+  ECDSA-P256-SHA256、SM2-SM3、CRYSTALS-Dilithium2 和公开
+  `composite_verify()`；Release 正式结果与 CSV/Markdown 报告独立于 CTest smoke。
 
 ## ML-KEM primitive 边界
 
@@ -132,8 +137,8 @@ GM/T 正式 PQKEX。
 
 ```text
 normal clean build:        PASS
-normal CTest:              12/12 PASS
-ASan + UBSan CTest:        12/12 PASS
+normal CTest:              13/13 PASS
+ASan + UBSan CTest:        13/13 PASS
 mlkem_demo:                PASS
 NIST ACVP ML-KEM-768 KAT: PASS
 patched GmSSL pqkextest:   PASS (strict TLCP capability tests)
@@ -321,7 +326,21 @@ hybrid_x509
 hybrid_chain
 mlkem
 mlkem_kat
+benchmark_smoke
 ```
+
+正式性能测量必须使用 Release build，不使用 sanitizer build：
+
+```sh
+cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release
+cmake --build build-bench -j
+./build-bench/benchmark_composite_verify \
+  --warmup 1000 --iterations 10000 \
+  --csv artifacts/composite_verify_benchmark.csv
+```
+
+`benchmark_smoke` 不执行 50 ms 硬性 gate；课题验收值来自独立正式运行的
+`composite_verify()` mean，ECDSA-P256-SHA256 仅为性能 baseline。
 
 生成和验证：
 
