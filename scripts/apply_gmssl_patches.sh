@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Apply the zero-padded incremental patch series in a locale-stable order.
+LC_ALL=C
+export LC_ALL
+
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 gmssl_dir=${1:-"$project_dir/third_party/GmSSL"}
 

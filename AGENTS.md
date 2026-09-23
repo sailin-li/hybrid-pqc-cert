@@ -4,13 +4,14 @@
 
 项目名：`hybrid-pqc-cert`，课题 5“国密证书支持抗量子算法方案设计”。
 
-当前已完成证书层、TLCP Certificate 握手接入、独立 KEM primitive 和验证性能
+当前已完成证书层、TLCP Certificate 握手接入、独立 KEM primitive、验证性能
 benchmark：实验性 SM2 + CRYSTALS-Dilithium2 Composite Signature、Root Hybrid
 CA、Root 签发 Server、两级链与严格双验证、FIPS 203 ML-KEM-768
 KeyGen/Encaps/Decaps，以及以 ECDSA-P256-SHA256 为 baseline 的完整
-`composite_verify()` 测量。不要把
-ML-KEM 接入 SM2 Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP 握手、TLS
-握手或 `post-quantum_pre_shared_key`，除非后续任务明确要求。当前 PQKEX 只
+`composite_verify()` 测量，并完成 TLS 1.3 私有实验
+`post_quantum_pre_shared_key`（0xFF03）。不要把 ML-KEM 接入 SM2 Hybrid KEX、
+Hybrid KDF、完整 GM/T 0024/TLCP 握手或 0xFF03 external PSK provisioning，
+除非后续任务明确要求。当前 PQKEX 只
 实现 ClientHello capability extension 编解码和 KEM 选择；TLCP Certificate
 阶段已对 Composite signing certificate 和 SM2-SPKI/Composite-signed encryption
 certificate 分别执行严格双验证，但 ServerKeyExchange 仍为原有 SM2 signature。
@@ -58,6 +59,32 @@ certificate 分别执行严格双验证，但 ServerKeyExchange 仍为原有 SM2
 - `benchmark_composite_verify` 使用统一 1024-byte message，分别测量
   ECDSA-P256-SHA256、SM2-SM3、CRYSTALS-Dilithium2 和公开
   `composite_verify()`；Release 正式结果与 CSV/Markdown 报告独立于 CTest smoke。
+- `patches/gmssl/0004-add-tls13-post-quantum-pre-shared-key.patch` 在前三个冻结
+  补丁之后增加 TLS 1.3 私有空 flag `0xFF03`，复用标准 external PSK
+  identity/binder/selected_identity，强制 PSK-DHE，并保留 Certificate 与
+  CertificateVerify；GmSSL submodule 保持 clean。
+
+## TLS 1.3 post_quantum_pre_shared_key 边界
+
+`post_quantum_pre_shared_key` 是项目私有实验 TLS 1.3 extension，ExtensionType
+为 `0xFF03`，固定编码 `FF030000`。其行为 modeled after RFC 9973
+`tls_cert_with_extern_psk`，但 0xFF03 不是 RFC 9973 或 IANA 正式分配值。
+
+0xFF03 只允许出现在 ClientHello/ServerHello，且 extension_data 必须为空。PSK
+identity、external binder 和 selected_identity 只使用标准 `pre_shared_key`；raw
+PSK 不得进入握手。ClientHello 必须同时有 supported_groups、key_share、
+psk_key_exchange_modes（包含 psk_dhe_ke）和最后一个 pre_shared_key；禁止
+early_data、PSK-only 和 resumption PSK。External PSK 进入现有 Early Secret，
+ECDHE 继续进入 Handshake Secret；不得复制 KDF 或 binder 实现。
+
+成功协商时 `post_quantum_psk_negotiated` 与普通 PSK 状态分开，即使选中 PSK，
+Server Certificate 和 CertificateVerify 仍必须发送并验证。默认 identity 无匹配时
+回退普通 certificate TLS 1.3；strict 配置必须失败。HRR 后 ClientHello2 必须重复
+0xFF03、保持 pre_shared_key last，并复用既有 HRR transcript/binder 逻辑。
+
+该补丁不得调用 ML-KEM，不得修改 PQKEX 0xFF02、TLCP master secret、Composite
+X.509、Dilithium 或 OpenSSL。CLI `-psk_key` 只用于测试/演示，不能打印 PSK 或
+派生 secret；临时 binder/key schedule material 使用现有 secure-clear API。
 
 ## ML-KEM primitive 边界
 
@@ -144,12 +171,13 @@ NIST ACVP ML-KEM-768 KAT: PASS
 patched GmSSL pqkextest:   PASS (strict TLCP capability tests)
 patched gmssl pqkex_demo:  PASS (capability only; no ML-KEM operation)
 patched TLCP hybrid test:  PASS (Certificate stage + SM2 ServerKeyExchange)
+patched TLS13 PQ-PSK:      PASS (0xFF03 + external PSK + DHE + certificate)
 Root -> Server chain:      VALID
 ```
 
 主项目原有测试、adapter、`mlkem` 和 `mlkem_kat` 全部保持通过；
 PQKEX 由 patched GmSSL 的 `pqkextest` 覆盖。后续修改 PQKEX、ML-KEM、构建配置
-或依赖时，必须同时运行主项目全部 12 项测试和 GmSSL PQKEX 测试。生成的 liboqs
+或依赖时，必须同时运行主项目全部 13 项测试和 GmSSL PQKEX 测试。生成的 liboqs
 `oqsconfig.h` 还必须确认
 `OQS_ENABLE_KEM_ml_kem_768` 已启用且 `OQS_ENABLE_KEM_kyber_768` 未启用。
 

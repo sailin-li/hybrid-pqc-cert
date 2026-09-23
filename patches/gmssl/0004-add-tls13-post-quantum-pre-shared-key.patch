@@ -1,0 +1,2016 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index abc32612d2c6527492bee72f2816f7deaa5117c7..4101d5556c3d55e5a6c818b1e553b93f9b735ae7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -698,7 +698,7 @@ if (ENABLE_TLS)
+ 		tools/tls13_server.c
+ 		tools/pqkex_demo.c
+ 		tools/sctverify.c)
+-	list(APPEND tests tls tls13 tls_ocsp pqkex)
++	list(APPEND tests tls tls13 tls13pqpsk tls_ocsp pqkex)
+ endif()
+ 
+ if (ENABLE_QUIC)
+@@ -954,6 +954,11 @@ if(ENABLE_TLS AND NOT WIN32)
+ 	add_test(NAME tool_tls13_psk_dhe_sm4_gcm COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_psk_dhe_sm4_gcm -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
+ 	add_test(NAME tool_tls13_psk_only_sm4_gcm COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_psk_only_sm4_gcm -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
+ 	add_test(NAME tool_tls13_early_data_sm4_gcm COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_early_data_sm4_gcm -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
++	add_test(NAME tool_tls13_pqpsk_sm4_gcm COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_pqpsk_sm4_gcm -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
++	add_test(NAME tool_tls13_pqpsk_hrr_sm4_gcm COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_pqpsk_hrr_sm4_gcm -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
++	add_test(NAME tool_tls13_pqpsk_identity_fallback COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_pqpsk_identity_fallback -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
++	add_test(NAME tool_tls13_pqpsk_wrong_key COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_pqpsk_wrong_key -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
++	add_test(NAME tool_tls13_pqpsk_identity_strict COMMAND ${CMAKE_COMMAND} -DTEST_CASE=tls13_pqpsk_identity_strict -P "${CMAKE_SOURCE_DIR}/cmake/tls13_commands.cmake")
+ 	set_tests_properties(
+ 		tool_tlcp_sm4_gcm_sni
+ 		tool_tlcp_sm4_cbc_sni
+@@ -971,6 +976,11 @@ if(ENABLE_TLS AND NOT WIN32)
+ 		tool_tls13_psk_dhe_sm4_gcm
+ 		tool_tls13_psk_only_sm4_gcm
+ 		tool_tls13_early_data_sm4_gcm
++		tool_tls13_pqpsk_sm4_gcm
++		tool_tls13_pqpsk_hrr_sm4_gcm
++		tool_tls13_pqpsk_identity_fallback
++		tool_tls13_pqpsk_wrong_key
++		tool_tls13_pqpsk_identity_strict
+ 		PROPERTIES FIXTURES_REQUIRED gmssl_cert_files)
+ 	if(OPENSSL_EXECUTABLE AND GMSSL_OPENSSL_INTEROP_ENABLED)
+ 		add_test(NAME tool_tls12_openssl_server COMMAND ${CMAKE_COMMAND} -DOPENSSL_EXECUTABLE=${OPENSSL_EXECUTABLE} -DTEST_CASE=tls12_openssl_server -P "${CMAKE_SOURCE_DIR}/cmake/openssl_interop_commands.cmake")
+diff --git a/cmake/tls13_commands.cmake b/cmake/tls13_commands.cmake
+index 3e6c9d248efdf5bcc9ac72705b3c5c31fbedb2d3..8f0144f0537a8077da89694842ee6e5095f6fa3c 100644
+--- a/cmake/tls13_commands.cmake
++++ b/cmake/tls13_commands.cmake
+@@ -7,6 +7,7 @@ gmssl_require_file(sm2_tls_client_certs.pem)
+ gmssl_require_file(sm2_tls_client_key.pem)
+ 
+ set(TLS13_PSK 1122334455667788112233445566778811223344556677881122334455667788)
++set(TLS13_PSK_OTHER 8877665544332211887766554433221188776655443322118877665544332211)
+ 
+ if(NOT DEFINED TEST_CASE)
+ 	set(TEST_CASE tls13_sm4_gcm_sni)
+@@ -172,6 +173,199 @@ elseif(TEST_CASE STREQUAL tls13_early_data_sm4_gcm)
+ 			-early_data tls13_early_data_sm4_gcm_early_data.txt
+ 			-in tls13_early_data_sm4_gcm_message.txt
+ 	)
++elseif(TEST_CASE STREQUAL tls13_pqpsk_sm4_gcm)
++	gmssl_run_tls_command_test(
++		TEST_NAME tls13_pqpsk_sm4_gcm
++		PORT 4463
++		EXPECT_CLIENT_LOGS
++			"post_quantum_pre_shared_key (experimental/private) (65283)"
++			"recv server {Certificate}"
++			"recv server {CertificateVerify}"
++			"recv server {Finished}"
++		SERVER_ARGS
++			tls13_server
++			-port 4463
++			-cert sm2_tls_server_certs.pem
++			-key sm2_tls_server_key.pem
++			-pass P@ssw0rd
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++			-verbose
++		CLIENT_ARGS
++			tls13_client
++			-host 127.0.0.1
++			-port 4463
++			-server_name localhost
++			-cacert sm2_root_ca_cert.pem
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++			-verbose
++			-in tls13_pqpsk_sm4_gcm_message.txt
++	)
++elseif(TEST_CASE STREQUAL tls13_pqpsk_hrr_sm4_gcm)
++	gmssl_run_tls_command_test(
++		TEST_NAME tls13_pqpsk_hrr_sm4_gcm
++		PORT 4464
++		EXPECT_CLIENT_LOGS
++			"selected_group: sm2p256v1"
++			"send ClientHello again"
++			"recv server {Certificate}"
++			"recv server {CertificateVerify}"
++		SERVER_ARGS
++			tls13_server
++			-port 4464
++			-cert sm2_tls_server_certs.pem
++			-key sm2_tls_server_key.pem
++			-pass P@ssw0rd
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++			-verbose
++		CLIENT_ARGS
++			tls13_client
++			-host 127.0.0.1
++			-port 4464
++			-server_name localhost
++			-cacert sm2_root_ca_cert.pem
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group prime256v1
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-max_key_exchanges 1
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++			-verbose
++			-in tls13_pqpsk_hrr_sm4_gcm_message.txt
++	)
++elseif(TEST_CASE STREQUAL tls13_pqpsk_identity_fallback)
++	gmssl_run_tls_command_test(
++		TEST_NAME tls13_pqpsk_identity_fallback
++		PORT 4465
++		EXPECT_CLIENT_LOGS
++			"recv server {Certificate}"
++			"recv server {CertificateVerify}"
++		SERVER_ARGS
++			tls13_server
++			-port 4465
++			-cert sm2_tls_server_certs.pem
++			-key sm2_tls_server_key.pem
++			-pass P@ssw0rd
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-server
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++		CLIENT_ARGS
++			tls13_client
++			-host 127.0.0.1
++			-port 4465
++			-server_name localhost
++			-cacert sm2_root_ca_cert.pem
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-client
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-post_quantum_pre_shared_key
++			-verbose
++			-in tls13_pqpsk_identity_fallback_message.txt
++	)
++elseif(TEST_CASE STREQUAL tls13_pqpsk_wrong_key)
++	gmssl_run_tls_command_test(
++		TEST_NAME tls13_pqpsk_wrong_key
++		PORT 4466
++		EXPECT_CLIENT_FAILURE
++		EXPECT_SERVER_LOG "tls13_process_client_pre_shared_key_external"
++		SERVER_ARGS
++			tls13_server
++			-port 4466
++			-cert sm2_tls_server_certs.pem
++			-key sm2_tls_server_key.pem
++			-pass P@ssw0rd
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK_OTHER}
++			-require_post_quantum_pre_shared_key
++		CLIENT_ARGS
++			tls13_client
++			-host 127.0.0.1
++			-port 4466
++			-server_name localhost
++			-cacert sm2_root_ca_cert.pem
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-demo
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-require_post_quantum_pre_shared_key
++			-in tls13_pqpsk_wrong_key_message.txt
++	)
++elseif(TEST_CASE STREQUAL tls13_pqpsk_identity_strict)
++	gmssl_run_tls_command_test(
++		TEST_NAME tls13_pqpsk_identity_strict
++		PORT 4467
++		EXPECT_CLIENT_FAILURE
++		SERVER_ARGS
++			tls13_server
++			-port 4467
++			-cert sm2_tls_server_certs.pem
++			-key sm2_tls_server_key.pem
++			-pass P@ssw0rd
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-server
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-require_post_quantum_pre_shared_key
++		CLIENT_ARGS
++			tls13_client
++			-host 127.0.0.1
++			-port 4467
++			-server_name localhost
++			-cacert sm2_root_ca_cert.pem
++			-cipher_suite TLS_SM4_GCM_SM3
++			-supported_group sm2p256v1
++			-sig_alg sm2sig_sm3
++			-psk_dhe_ke
++			-psk_identity pq-client
++			-psk_cipher_suite TLS_SM4_GCM_SM3
++			-psk_key ${TLS13_PSK}
++			-require_post_quantum_pre_shared_key
++			-in tls13_pqpsk_identity_strict_message.txt
++	)
+ else()
+ 	message(FATAL_ERROR "unknown TLS 1.3 test case: ${TEST_CASE}")
+ endif()
+diff --git a/cmake/tls_command_test.cmake b/cmake/tls_command_test.cmake
+index 644b24e1bc2f823c6abc28464237b1632bb9b5a3..58cdb565ccd860be086c5b0def911bbe0b5a0cfa 100644
+--- a/cmake/tls_command_test.cmake
++++ b/cmake/tls_command_test.cmake
+@@ -99,8 +99,8 @@ function(gmssl_run_tls_command_test)
+ 	endif()
+ 
+ 	set(one_value_args TEST_NAME PORT EXPECT_CLIENT_LOG EXPECT_SERVER_LOG)
+-	set(multi_value_args SERVER_ARGS CLIENT_ARGS)
+-	cmake_parse_arguments(TEST "" "${one_value_args}" "${multi_value_args}" ${ARGN})
++	set(multi_value_args SERVER_ARGS CLIENT_ARGS EXPECT_CLIENT_LOGS EXPECT_SERVER_LOGS)
++	cmake_parse_arguments(TEST "EXPECT_CLIENT_FAILURE" "${one_value_args}" "${multi_value_args}" ${ARGN})
+ 
+ 	if(NOT TEST_TEST_NAME)
+ 		message(FATAL_ERROR "TEST_NAME is required")
+@@ -166,17 +166,26 @@ function(gmssl_run_tls_command_test)
+ 		file(READ "${CLIENT_LOG}" CLIENT_LOG_CONTENT)
+ 	endif()
+ 
+-	if(NOT ${CLIENT_RESULT} EQUAL 0)
+-		message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
+-		message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
+-		message(FATAL_ERROR "client failed with result ${CLIENT_RESULT}")
+-	endif()
++	if(TEST_EXPECT_CLIENT_FAILURE)
++		string(FIND "${CLIENT_LOG_CONTENT}" "Connection established" FOUND_INDEX)
++		if(${CLIENT_RESULT} EQUAL 0 AND NOT ${FOUND_INDEX} EQUAL -1)
++			message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
++			message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
++			message(FATAL_ERROR "client unexpectedly established a connection")
++		endif()
++	else()
++		if(NOT ${CLIENT_RESULT} EQUAL 0)
++			message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
++			message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
++			message(FATAL_ERROR "client failed with result ${CLIENT_RESULT}")
++		endif()
+ 
+-	string(FIND "${CLIENT_LOG_CONTENT}" "Connection established" FOUND_INDEX)
+-	if(${FOUND_INDEX} EQUAL -1)
+-		message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
+-		message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
+-		message(FATAL_ERROR "client did not establish connection with server")
++		string(FIND "${CLIENT_LOG_CONTENT}" "Connection established" FOUND_INDEX)
++		if(${FOUND_INDEX} EQUAL -1)
++			message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
++			message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
++			message(FATAL_ERROR "client did not establish connection with server")
++		endif()
+ 	endif()
+ 
+ 	if(TEST_EXPECT_CLIENT_LOG)
+@@ -195,6 +204,22 @@ function(gmssl_run_tls_command_test)
+ 		endif()
+ 	endif()
+ 
++	foreach(EXPECTED_TEXT IN LISTS TEST_EXPECT_CLIENT_LOGS)
++		string(FIND "${CLIENT_LOG_CONTENT}" "${EXPECTED_TEXT}" FOUND_INDEX)
++		if(${FOUND_INDEX} EQUAL -1)
++			message(STATUS "${CLIENT_LOG}:\n${CLIENT_LOG_CONTENT}")
++			message(FATAL_ERROR "client log does not contain expected text: ${EXPECTED_TEXT}")
++		endif()
++	endforeach()
++
++	foreach(EXPECTED_TEXT IN LISTS TEST_EXPECT_SERVER_LOGS)
++		string(FIND "${SERVER_LOG_CONTENT}" "${EXPECTED_TEXT}" FOUND_INDEX)
++		if(${FOUND_INDEX} EQUAL -1)
++			message(STATUS "${SERVER_LOG}:\n${SERVER_LOG_CONTENT}")
++			message(FATAL_ERROR "server log does not contain expected text: ${EXPECTED_TEXT}")
++		endif()
++	endforeach()
++
+ 	if(POLICY CMP0053)
+ 		cmake_policy(POP)
+ 	endif()
+diff --git a/include/gmssl/tls.h b/include/gmssl/tls.h
+index 811b9ec8c1cd0db66a794c9a7fded40568b73846..dd9aec4d61c52ffc7604ccb592353c2e9e50842d 100644
+--- a/include/gmssl/tls.h
++++ b/include/gmssl/tls.h
+@@ -250,6 +250,9 @@ typedef enum {
+ 	/* Project-private experimental PQKEX capability extension. This value is
+ 	 * not assigned by GM/T or IANA. */
+ 	TLS_extension_pqkex			= 65282,
++	/* Project-private experimental TLS 1.3 extension. Not assigned by
++	 * IANA. Behavior modeled after RFC 9973 tls_cert_with_extern_psk. */
++	TLS_extension_post_quantum_pre_shared_key = 65283,
+ } TLS_EXTENSION_TYPE;
+ 
+ const char *tls_extension_name(int ext);
+@@ -987,6 +990,10 @@ typedef struct {
+ 	// 51. key_share
+ 	size_t key_exchanges_cnt;
+ 
++	// 65283. post_quantum_pre_shared_key (TLS 1.3, private use)
++	int post_quantum_pre_shared_key;
++	int require_post_quantum_pre_shared_key;
++
+ 	// 66. client_id (TLCP only)
+ 	int client_id;
+ 
+@@ -1348,6 +1355,11 @@ typedef struct {
+ 	uint8_t psk[32]; // 这应该改为一个指针
+ 	size_t psk_len;
+ 	int selected_psk_identity;
++	int selected_external_psk;
++
++	// 65283. post_quantum_pre_shared_key (TLS 1.3, private use)
++	int post_quantum_psk_offered;
++	int post_quantum_psk_negotiated;
+ 
+ 
+ 	int client_certificate_verify; // TLS1.2 TLCP需要这个
+@@ -1448,6 +1460,14 @@ int tls13_record_get_handshake_hello_retry_request(uint8_t *record,
+ int tls13_hello_retry_request_print(FILE *fp, int fmt, int ind, const uint8_t *d, size_t dlen);
+ 
+ 
++// EncryptedExtensions
++
++int tls13_record_set_handshake_encrypted_extensions(uint8_t *record, size_t *recordlen,
++	const uint8_t *exts, size_t extslen);
++int tls13_record_get_handshake_encrypted_extensions(const uint8_t *record,
++	const uint8_t **exts, size_t *extslen);
++
++
+ // Certificate
+ 
+ int tls13_certificate_entry_to_bytes(const uint8_t *cert, size_t certlen,
+@@ -1819,6 +1839,11 @@ int tls13_add_pre_shared_key_from_session_file(TLS_CONNECT *conn, FILE *fp);
+ 
+ int tls13_ctx_set_psk_key_exchange_modes(TLS_CTX *ctx, int psk_ke, int psk_dhe_ke);
+ 
++int tls13_ctx_enable_post_quantum_pre_shared_key(TLS_CTX *ctx, int enable);
++int tls13_ctx_require_post_quantum_pre_shared_key(TLS_CTX *ctx, int require);
++int tls13_post_quantum_pre_shared_key_ext_to_bytes(uint8_t **out, size_t *outlen);
++int tls13_post_quantum_pre_shared_key_from_bytes(const uint8_t *ext_data, size_t ext_datalen);
++
+ 
+ int tls13_verify_psk_binder(const DIGEST *digest,
+ 	const uint8_t *pre_shared_key, size_t pre_shared_key_len,
+diff --git a/src/tls13.c b/src/tls13.c
+index 2e726380dc842613a6447648970cbf759cc2423e..be74675d58ce80098968c6214da7258d71945ef5 100644
+--- a/src/tls13.c
++++ b/src/tls13.c
+@@ -2592,6 +2592,9 @@ int tls13_server_hello_print(FILE *fp, int fmt, int ind, const uint8_t *d, size_
+ 		case TLS_extension_pre_shared_key:
+ 			tls13_server_pre_shared_key_print(fp, fmt, ind + 4, ext_data, ext_datalen);
+ 			break;
++		case TLS_extension_post_quantum_pre_shared_key:
++			format_bytes(fp, fmt, ind + 4, "data", ext_data, ext_datalen);
++			break;
+ 		case TLS_extension_cookie:
+ 			tls13_cookie_print(fp, fmt, ind + 4, ext_data, ext_datalen);
+ 			break;
+@@ -3937,6 +3940,33 @@ Auth | {CertificateVerify*}
+ 
+ 
+ 
++static int tls13_post_quantum_psk_client_config_check(TLS_CONNECT *conn)
++{
++	size_t i;
++
++	if (!conn || !conn->ctx) {
++		error_print();
++		return -1;
++	}
++	if (!conn->ctx->post_quantum_pre_shared_key) {
++		return 1;
++	}
++	if (!conn->is_client || conn->early_data || !conn->pre_shared_key
++		|| !conn->ctx->supported_groups_cnt || !conn->key_share
++		|| !(conn->key_exchange_modes & TLS_KE_PSK_DHE)
++		|| !conn->psk_cipher_suites_cnt) {
++		error_print();
++		return -1;
++	}
++	for (i = 0; i < conn->psk_cipher_suites_cnt; i++) {
++		if (conn->psk_identity_types[i] != TLS13_PSK_IDENTITY_EXTERNAL) {
++			error_print();
++			return -1;
++		}
++	}
++	return 1;
++}
++
+ int tls13_init(TLS_CONNECT *conn, TLS_CTX *ctx)
+ {
+ 	if (!ctx->supported_versions_cnt) {
+@@ -4044,6 +4074,11 @@ int tls13_send_client_hello(TLS_CONNECT *conn)
+ 		uint8_t *pexts = exts;
+ 		size_t extslen = 0;
+ 
++		if (tls13_post_quantum_psk_client_config_check(conn) != 1) {
++			error_print();
++			return -1;
++		}
++
+ 		if(conn->verbose) tls_trace("send ClientHello\n");
+ 
+ 		// record_version
+@@ -4176,6 +4211,15 @@ int tls13_send_client_hello(TLS_CONNECT *conn)
+ 			}
+ 		}
+ 
++		// post_quantum_pre_shared_key (empty project-private flag)
++		if (conn->ctx->post_quantum_pre_shared_key) {
++			if (tls13_post_quantum_pre_shared_key_ext_to_bytes(&pexts, &extslen) != 1) {
++				error_print();
++				return -1;
++			}
++			conn->post_quantum_psk_offered = 1;
++		}
++
+ 		// status_request (hint only)
+ 		if (conn->status_request) {
+ 			if (tls_client_status_request_ext_to_bytes(TLS_certificate_status_type_ocsp,
+@@ -4435,7 +4479,9 @@ int tls13_recv_hello_retry_request(TLS_CONNECT *conn)
+ 
+ 	// legacy_session_id_echo
+ 	if (legacy_session_id_echo_len != conn->session_id_len
+-		|| memcmp(legacy_session_id_echo, conn->session_id, conn->session_id_len) != 0) {
++		|| (conn->session_id_len
++			&& memcmp(legacy_session_id_echo, conn->session_id,
++				conn->session_id_len) != 0)) {
+ 		error_print();
+ 		tls13_send_alert(conn, TLS_alert_illegal_parameter);
+ 		return -1;
+@@ -4642,6 +4688,9 @@ int tls13_client_hello_again_psk_update(TLS_CONNECT *conn)
+ 	uint8_t tmp_keys_buf[sizeof(conn->psk_keys)];
+ 	uint8_t *tmp_keys = tmp_keys_buf;
+ 	size_t tmp_keys_len = 0;
++	uint8_t tmp_identity_types[sizeof(conn->psk_identity_types)];
++	size_t psk_identities_len;
++	size_t psk_keys_len;
+ 	size_t tmp_cipher_suites_cnt = 0;
+ 	size_t i;
+ 
+@@ -4651,6 +4700,8 @@ int tls13_client_hello_again_psk_update(TLS_CONNECT *conn)
+ 	}
+ 	psk_identities = conn->psk_identities;
+ 	psk_keys = conn->psk_keys;
++	psk_identities_len = conn->psk_identities_len;
++	psk_keys_len = conn->psk_keys_len;
+ 
+ 	for (i = 0; i < conn->psk_cipher_suites_cnt; i++) {
+ 		const uint8_t *identity;
+@@ -4659,20 +4710,25 @@ int tls13_client_hello_again_psk_update(TLS_CONNECT *conn)
+ 		const uint8_t *key;
+ 		size_t key_len;
+ 
+-		if (tls13_psk_identity_from_bytes(&identity, &identity_len, &obfuscated_ticket_age, &psk_identities, &conn->psk_identities_len) != 1
+-			|| tls_uint8array_from_bytes(&key, &key_len, &psk_keys, &conn->psk_keys_len) != 1) {
++		if (tls13_psk_identity_from_bytes(&identity, &identity_len, &obfuscated_ticket_age,
++			&psk_identities, &psk_identities_len) != 1
++			|| tls_uint8array_from_bytes(&key, &key_len,
++				&psk_keys, &psk_keys_len) != 1) {
+ 			gmssl_secure_clear(tmp_keys_buf, sizeof(tmp_keys_buf));
++			gmssl_secure_clear(tmp_identity_types, sizeof(tmp_identity_types));
+ 			error_print();
+ 			return -1;
+ 		}
+ 		if (conn->psk_cipher_suites[i] == conn->cipher_suite) {
+ 			tls13_psk_identity_to_bytes(identity, identity_len, obfuscated_ticket_age, &tmp_identities, &tmp_identities_len);
+-			tls_uint16array_to_bytes(key, key_len, &tmp_keys, &tmp_keys_len);
++			tls_uint8array_to_bytes(key, key_len, &tmp_keys, &tmp_keys_len);
++			tmp_identity_types[tmp_cipher_suites_cnt] = conn->psk_identity_types[i];
+ 			tmp_cipher_suites_cnt++;
+ 		}
+ 	}
+-	if (conn->psk_identities_len || conn->psk_keys_len) {
++	if (psk_identities_len || psk_keys_len) {
+ 		gmssl_secure_clear(tmp_keys_buf, sizeof(tmp_keys_buf));
++		gmssl_secure_clear(tmp_identity_types, sizeof(tmp_identity_types));
+ 		error_print();
+ 		return -1;
+ 	}
+@@ -4683,10 +4739,12 @@ int tls13_client_hello_again_psk_update(TLS_CONNECT *conn)
+ 	conn->psk_keys_len = tmp_keys_len;
+ 	for (i = 0; i < tmp_cipher_suites_cnt; i++) {
+ 		conn->psk_cipher_suites[i] = conn->cipher_suite;
++		conn->psk_identity_types[i] = tmp_identity_types[i];
+ 	}
+ 	conn->psk_cipher_suites_cnt = tmp_cipher_suites_cnt;
+ 
+ 	gmssl_secure_clear(tmp_keys_buf, sizeof(tmp_keys_buf));
++	gmssl_secure_clear(tmp_identity_types, sizeof(tmp_identity_types));
+ 	return 1;
+ }
+ 
+@@ -4704,6 +4762,13 @@ int tls13_send_client_hello_again(TLS_CONNECT *conn)
+ 		int supported_versions = TLS_protocol_tls13;
+ 		int curve_oid;
+ 
++		if (tls13_post_quantum_psk_client_config_check(conn) != 1
++			|| (conn->ctx->post_quantum_pre_shared_key
++				&& !conn->post_quantum_psk_offered)) {
++			error_print();
++			return -1;
++		}
++
+ 		// record_version
+ 		tls_record_set_protocol(conn->record, TLS_protocol_tls1);
+ 
+@@ -4793,6 +4858,14 @@ int tls13_send_client_hello_again(TLS_CONNECT *conn)
+ 				return -1;
+ 			}
+ 		}
++
++		// Must be repeated after HelloRetryRequest.
++		if (conn->post_quantum_psk_offered) {
++			if (tls13_post_quantum_pre_shared_key_ext_to_bytes(&pexts, &extslen) != 1) {
++				error_print();
++				return -1;
++			}
++		}
+ 		// update key_exchange_modes (disable PSK-only)
+ 		conn->key_exchange_modes &= ~TLS_KE_PSK;
+ 
+@@ -4971,6 +5044,7 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 	size_t key_share_len;
+ 	const uint8_t *pre_shared_key = NULL;
+ 	size_t pre_shared_key_len;
++	int post_quantum_pre_shared_key = 0;
+ 
+ 	int selected_version;
+ 	int server_key_exchange_mode = 0;
+@@ -5021,7 +5095,9 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 
+ 	// legacy_session_id_echo
+ 	if (legacy_session_id_echo_len != conn->session_id_len
+-		|| memcmp(legacy_session_id_echo, conn->session_id, conn->session_id_len) != 0) {
++		|| (conn->session_id_len
++			&& memcmp(legacy_session_id_echo, conn->session_id,
++				conn->session_id_len) != 0)) {
+ 		error_print();
+ 		tls13_send_alert(conn, TLS_alert_illegal_parameter);
+ 		return -1;
+@@ -5080,6 +5156,14 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 				return -1;
+ 			}
+ 			break;
++		case TLS_extension_post_quantum_pre_shared_key:
++			if (tls13_post_quantum_pre_shared_key_from_bytes(
++				ext_data, ext_datalen) != 1) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
++			break;
+ 		}
+ 
+ 		switch (ext_type) {
+@@ -5125,6 +5209,16 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 			pre_shared_key_len = ext_datalen;
+ 			break;
+ 
++		case TLS_extension_post_quantum_pre_shared_key:
++			if (!conn->post_quantum_psk_offered
++				|| post_quantum_pre_shared_key) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
++			post_quantum_pre_shared_key = 1;
++			break;
++
+ 		default:
+ 			error_print();
+ 			tls13_send_alert(conn, TLS_alert_illegal_parameter);
+@@ -5137,6 +5231,23 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 		tls13_send_alert(conn, TLS_alert_missing_extension);
+ 		return -1;
+ 	}
++	if (post_quantum_pre_shared_key && (!key_share || !pre_shared_key)) {
++		error_print();
++		tls13_send_alert(conn, TLS_alert_missing_extension);
++		return -1;
++	}
++	if (conn->post_quantum_psk_offered && pre_shared_key
++		&& !post_quantum_pre_shared_key) {
++		error_print();
++		tls13_send_alert(conn, TLS_alert_illegal_parameter);
++		return -1;
++	}
++	if (conn->ctx->require_post_quantum_pre_shared_key
++		&& !post_quantum_pre_shared_key) {
++		error_print();
++		tls13_send_alert(conn, TLS_alert_handshake_failure);
++		return -1;
++	}
+ 
+ 	// if HelloRetryRequest, key_share must exist
+ 	if (conn->hello_retry_request) {
+@@ -5273,6 +5384,17 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 			error_print();
+ 			return -1;
+ 		}
++		if (post_quantum_pre_shared_key) {
++			if ((size_t)selected_identity >= conn->psk_cipher_suites_cnt
++				|| conn->psk_identity_types[selected_identity]
++					!= TLS13_PSK_IDENTITY_EXTERNAL) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
++			conn->selected_external_psk = 1;
++			conn->selected_psk_identity = selected_identity + 1;
++		}
+ 
+ 		// TODO: change psk from buf to reference
+ 		if (keylen > sizeof(conn->psk)) {
+@@ -5282,6 +5404,15 @@ int tls13_recv_server_hello(TLS_CONNECT *conn)
+ 		memcpy(conn->psk, key, keylen);
+ 		conn->psk_len = keylen;
+ 	}
++	if (post_quantum_pre_shared_key) {
++		if (server_key_exchange_mode != TLS_KE_PSK_DHE
++			|| !conn->selected_external_psk) {
++			error_print();
++			tls13_send_alert(conn, TLS_alert_illegal_parameter);
++			return -1;
++		}
++		conn->post_quantum_psk_negotiated = 1;
++	}
+ 
+ 
+ 	if (conn->hello_retry_request) {
+@@ -6203,7 +6334,7 @@ int tls13_recv_server_certificate(TLS_CONNECT *conn)
+ 	} else if (ret == 0) {
+ 		error_print();
+ 		tls13_send_alert(conn, TLS_alert_unexpected_message);
+-		return 0;
++		return -1;
+ 	}
+ 
+ 	if (request_context) {
+@@ -6763,10 +6894,13 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 	size_t psk_key_exchange_modes_len;
+ 	const uint8_t *pre_shared_key = NULL;
+ 	size_t pre_shared_key_len;
++	int pre_shared_key_is_last = 0;
+ 	const uint8_t *status_request = NULL;
+ 	size_t status_request_len;
+ 	int signed_certificate_timestamp = 0;
+ 	int early_data = 0;
++	int post_quantum_pre_shared_key = 0;
++	int post_quantum_psk_eligible = 0;
+ 
+ 	int common_versions[4];
+ 	size_t common_versions_cnt = 0;
+@@ -6915,6 +7049,14 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 				return -1;
+ 			}
+ 			break;
++		case TLS_extension_post_quantum_pre_shared_key:
++			if (tls13_post_quantum_pre_shared_key_from_bytes(
++				ext_data, ext_datalen) != 1) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
++			break;
+ 		}
+ 
+ 		switch (ext_type) {
+@@ -7016,6 +7158,16 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 			}
+ 			pre_shared_key = ext_data;
+ 			pre_shared_key_len = ext_datalen;
++			pre_shared_key_is_last = extslen == 0;
++			break;
++
++		case TLS_extension_post_quantum_pre_shared_key:
++			if (post_quantum_pre_shared_key) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
++			post_quantum_pre_shared_key = 1;
+ 			break;
+ 
+ 		case TLS_extension_status_request:
+@@ -7096,6 +7248,26 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 		tls13_send_alert(conn, TLS_alert_missing_extension);
+ 		return -1;
+ 	}
++	if (conn->ctx->require_post_quantum_pre_shared_key
++		&& !post_quantum_pre_shared_key) {
++		error_print();
++		tls13_send_alert(conn, TLS_alert_handshake_failure);
++		return -1;
++	}
++	if (post_quantum_pre_shared_key) {
++		conn->post_quantum_psk_offered = 1;
++		if (!supported_groups || !key_share || !psk_key_exchange_modes
++			|| !pre_shared_key || !signature_algorithms) {
++			error_print();
++			tls13_send_alert(conn, TLS_alert_missing_extension);
++			return -1;
++		}
++		if (!pre_shared_key_is_last || early_data) {
++			error_print();
++			tls13_send_alert(conn, TLS_alert_illegal_parameter);
++			return -1;
++		}
++	}
+ 
+ 	// supported_versions
+ 	if ((ret = tls13_process_client_supported_versions(
+@@ -7127,6 +7299,17 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 			return -1;
+ 		}
+ 	}
++	if (post_quantum_pre_shared_key) {
++		if (!(common_key_exchange_modes & TLS_KE_PSK_DHE)) {
++			if (conn->ctx->require_post_quantum_pre_shared_key) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_handshake_failure);
++				return -1;
++			}
++		} else if (conn->ctx->post_quantum_pre_shared_key) {
++			post_quantum_psk_eligible = 1;
++		}
++	}
+ 	// client key_exchange_modes
+ 	if (supported_groups && signature_algorithms) {
+ 		common_key_exchange_modes |= TLS_KE_CERT_DHE;
+@@ -7390,7 +7573,23 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 	// pre_shared_key
+ 	if (pre_shared_key) {
+ 		if (common_key_exchange_modes & (TLS_KE_PSK_DHE|TLS_KE_PSK)) {
+-			if (conn->psk_identities_len) {
++			if (post_quantum_pre_shared_key && !post_quantum_psk_eligible) {
++				common_key_exchange_modes &= ~(TLS_KE_PSK_DHE|TLS_KE_PSK);
++			} else if (post_quantum_pre_shared_key && conn->psk_identities_len) {
++				if ((ret = tls13_process_client_pre_shared_key_external(conn,
++					pre_shared_key, pre_shared_key_len)) < 0) {
++					error_print();
++					tls13_send_alert(conn, TLS_alert_illegal_parameter);
++					return -1;
++				} else if (ret == 0) {
++					common_key_exchange_modes &= ~(TLS_KE_PSK_DHE|TLS_KE_PSK);
++				} else {
++					conn->selected_external_psk = 1;
++				}
++			} else if (post_quantum_pre_shared_key) {
++				/* This mode never interprets a ticket as an external PSK. */
++				common_key_exchange_modes &= ~(TLS_KE_PSK_DHE|TLS_KE_PSK);
++			} else if (conn->psk_identities_len) {
+ 				if ((ret = tls13_process_client_pre_shared_key_external(conn,
+ 					pre_shared_key, pre_shared_key_len)) < 0) {
+ 					error_print();
+@@ -7416,6 +7615,13 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 			//format_bytes(stderr, 0, 0, "selected_psk", conn->psk, conn->psk_len);
+ 		}
+ 	}
++	if (post_quantum_pre_shared_key
++		&& conn->ctx->require_post_quantum_pre_shared_key
++		&& !conn->selected_external_psk) {
++		error_print();
++		tls13_send_alert(conn, TLS_alert_handshake_failure);
++		return -1;
++	}
+ 
+ 	/*
+ 	decide the final key exchange mode and  hello_retry_request
+@@ -7433,7 +7639,20 @@ int tls13_recv_client_hello(TLS_CONNECT *conn)
+ 		* key_exchange_group
+ 		* [key_exchanges_cnt]
+ 	*/
+-	if ((common_key_exchange_modes & TLS_KE_PSK_DHE) && conn->selected_psk_identity) {
++	if (post_quantum_psk_eligible && conn->selected_external_psk
++		&& (common_key_exchange_modes & TLS_KE_PSK_DHE)) {
++		if (!conn->cert_chain || !(common_key_exchange_modes & TLS_KE_CERT_DHE)
++			|| !conn->key_exchange_group) {
++			error_print();
++			tls13_send_alert(conn, TLS_alert_handshake_failure);
++			return -1;
++		}
++		conn->key_exchange_modes = TLS_KE_PSK_DHE;
++		conn->post_quantum_psk_negotiated = 1;
++		if (!conn->peer_key_exchange_len) {
++			conn->hello_retry_request = 1;
++		}
++	} else if ((common_key_exchange_modes & TLS_KE_PSK_DHE) && conn->selected_psk_identity) {
+ 		if (conn->key_exchange_group) {
+ 			conn->key_exchange_modes = TLS_KE_PSK_DHE;
+ 			if (!conn->peer_key_exchange_len) {
+@@ -7706,7 +7925,9 @@ int tls13_recv_client_hello_again(TLS_CONNECT *conn)
+ 	}
+ 	if (legacy_version != _legacy_version
+ 		|| legacy_session_id_len != _legacy_session_id_len
+-		|| memcmp(legacy_session_id, _legacy_session_id, _legacy_session_id_len) != 0
++		|| (_legacy_session_id_len
++			&& memcmp(legacy_session_id, _legacy_session_id,
++				_legacy_session_id_len) != 0)
+ 		|| cipher_suites_len != _cipher_suites_len
+ 		|| memcmp(cipher_suites, _cipher_suites, _cipher_suites_len) != 0) {
+ 		error_print();
+@@ -7863,6 +8084,11 @@ int tls13_recv_client_hello_again(TLS_CONNECT *conn)
+ 				tls13_send_alert(conn, TLS_alert_illegal_parameter);
+ 				return -1;
+ 			}
++			if (conn->post_quantum_psk_offered && extslen != 0) {
++				error_print();
++				tls13_send_alert(conn, TLS_alert_illegal_parameter);
++				return -1;
++			}
+ 			if (tls13_client_pre_shared_key_from_bytes(&psk_identities, &psk_identities_len,
+ 				&binders, &binders_len, ext_data, ext_datalen) != 1) {
+ 				error_print();
+@@ -8111,6 +8337,15 @@ int tls13_send_server_hello(TLS_CONNECT *conn)
+ 			}
+ 		}
+ 
++		// pre_shared_key
++		if (conn->post_quantum_psk_negotiated) {
++			if (tls13_post_quantum_pre_shared_key_ext_to_bytes(
++				&pexts, &extslen) != 1) {
++				error_print();
++				return -1;
++			}
++		}
++
+ 		// pre_shared_key
+ 		if (conn->selected_psk_identity) {
+ 			if (tls13_server_pre_shared_key_ext_to_bytes(
+@@ -9070,7 +9305,8 @@ int tls13_do_client_handshake(TLS_CONNECT *conn)
+ 
+ 	case TLS_state_certificate_request: // optional
+ 		ret = tls13_recv_certificate_request(conn);
+-		if (conn->key_exchange_modes == TLS_KE_CERT_DHE)
++		if (conn->key_exchange_modes == TLS_KE_CERT_DHE
++			|| conn->post_quantum_psk_negotiated)
+ 			next_state = TLS_state_server_certificate;
+ 		else	next_state = TLS_state_server_finished;
+ 		break;
+@@ -9198,14 +9434,16 @@ int tls13_do_server_handshake(TLS_CONNECT *conn)
+ 		ret = tls13_send_encrypted_extensions(conn);
+ 		if (conn->certificate_request)
+ 			next_state = TLS_state_certificate_request;
+-		else if (conn->key_exchange_modes == TLS_KE_CERT_DHE)
++		else if (conn->key_exchange_modes == TLS_KE_CERT_DHE
++			|| conn->post_quantum_psk_negotiated)
+ 			next_state = TLS_state_server_certificate;
+ 		else	next_state = TLS_state_server_finished;
+ 		break;
+ 
+ 	case TLS_state_certificate_request:
+ 		ret = tls13_send_certificate_request(conn);
+-		if (conn->key_exchange_modes == TLS_KE_CERT_DHE)
++		if (conn->key_exchange_modes == TLS_KE_CERT_DHE
++			|| conn->post_quantum_psk_negotiated)
+ 			next_state = TLS_state_server_certificate;
+ 		else	next_state = TLS_state_server_finished;
+ 		break;
+diff --git a/src/tls_psk.c b/src/tls_psk.c
+index 5e319a9caced6ba0c766df91b5ae427bf2a79edc..5eb31d850d5a2507ac990fc2922e6aee5e075f9d 100644
+--- a/src/tls_psk.c
++++ b/src/tls_psk.c
+@@ -24,6 +24,60 @@
+ #include <gmssl/tls.h>
+ 
+ 
++/*
++ * post_quantum_pre_shared_key is a project-private experimental TLS 1.3
++ * extension whose behavior is modeled after RFC 9973
++ * tls_cert_with_extern_psk. ExtensionType 0xFF03 is not assigned by IANA.
++ * The extension is an empty flag; PSK identities and binders remain in the
++ * standard pre_shared_key extension.
++ */
++int tls13_post_quantum_pre_shared_key_ext_to_bytes(uint8_t **out, size_t *outlen)
++{
++	if (!out || !*out || !outlen) {
++		error_print();
++		return -1;
++	}
++	return tls_ext_to_bytes(TLS_extension_post_quantum_pre_shared_key,
++		NULL, 0, out, outlen);
++}
++
++int tls13_post_quantum_pre_shared_key_from_bytes(const uint8_t *ext_data,
++	size_t ext_datalen)
++{
++	if (ext_data || ext_datalen) {
++		error_print();
++		return -1;
++	}
++	return 1;
++}
++
++int tls13_ctx_enable_post_quantum_pre_shared_key(TLS_CTX *ctx, int enable)
++{
++	if (!ctx || ctx->protocol != TLS_protocol_tls13) {
++		error_print();
++		return -1;
++	}
++	ctx->post_quantum_pre_shared_key = enable ? 1 : 0;
++	if (!enable) {
++		ctx->require_post_quantum_pre_shared_key = 0;
++	}
++	return 1;
++}
++
++int tls13_ctx_require_post_quantum_pre_shared_key(TLS_CTX *ctx, int require)
++{
++	if (!ctx || ctx->protocol != TLS_protocol_tls13) {
++		error_print();
++		return -1;
++	}
++	ctx->require_post_quantum_pre_shared_key = require ? 1 : 0;
++	if (require) {
++		ctx->post_quantum_pre_shared_key = 1;
++	}
++	return 1;
++}
++
++
+ /*
+ 45. psk_key_exchange_modes
+ 
+@@ -1065,7 +1119,7 @@ int tls13_psk_binders_generate(
+ 			return -1;
+ 		}
+ 		if (psk_key_len != digest->digest_size) {
+-			gmssl_secure_clear(early_secret, sizeof(early_secret));
++			gmssl_secure_clear(secret, sizeof(secret));
+ 			error_print();
+ 			return -1;
+ 		}
+@@ -1096,10 +1150,11 @@ static int tls13_psk_binder_verify_with_label(const DIGEST *digest,
+ 	uint8_t *local_binder = secret;
+ 	DIGEST_CTX null_dgst_ctx;
+ 	size_t local_binder_len;
++	int ret = -1;
+ 
+ 	if (digest_init(&null_dgst_ctx, digest) != 1) {
+ 		error_print();
+-		return -1;
++		goto end;
+ 	}
+ 
+ 	// [1]
+@@ -1109,11 +1164,16 @@ static int tls13_psk_binder_verify_with_label(const DIGEST *digest,
+ 
+ 	tls13_compute_verify_data(binder_key, truncated_client_hello_dgst_ctx, local_binder, &local_binder_len);
+ 
+-	if (binderlen != local_binder_len || memcmp(local_binder, binder, binderlen) != 0) {
+-		return 0;
++	if (binderlen != local_binder_len
++		|| gmssl_secure_memcmp(local_binder, binder, binderlen) != 0) {
++		ret = 0;
++		goto end;
+ 	}
++	ret = 1;
+ 
+-	return 1;
++end:
++	gmssl_secure_clear(secret, sizeof(secret));
++	return ret;
+ }
+ 
+ int tls13_psk_binder_verify(const DIGEST *digest,
+@@ -1449,7 +1509,8 @@ int tls13_process_client_pre_shared_key_external(TLS_CONNECT *conn,
+ 			error_print();
+ 			return -1;
+ 		} else if (ret == 0) {
+-			continue;
++			error_print();
++			return -1;
+ 		}
+ 
+ 		// set psk
+diff --git a/src/tls_trace.c b/src/tls_trace.c
+index ffe164e6e2e3b1c6903bd3217606f81fc3a991b8..8bb99e2ce343d4b656c3aa68cb9b82b1ae1a73aa 100644
+--- a/src/tls_trace.c
++++ b/src/tls_trace.c
+@@ -186,6 +186,8 @@ const char *tls_extension_name(int ext)
+ 	case TLS_extension_ticket_request: return "ticket_request";
+ 	case TLS_extension_renegotiation_info: return "renegotiation_info";
+ 	case TLS_extension_pqkex: return "pqkex (experimental/private)";
++	case TLS_extension_post_quantum_pre_shared_key:
++		return "post_quantum_pre_shared_key (experimental/private)";
+ 	};
+ 	return NULL;
+ }
+diff --git a/tests/tls13pqpsktest.c b/tests/tls13pqpsktest.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..398f1f1770dc552a54165adc8bc995c2310b4db6
+--- /dev/null
++++ b/tests/tls13pqpsktest.c
+@@ -0,0 +1,841 @@
++/*
++ *  Copyright 2014-2026 The GmSSL Project. All Rights Reserved.
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ */
++
++#include <stdio.h>
++#include <string.h>
++#ifndef WIN32
++#include <sys/socket.h>
++#include <unistd.h>
++#endif
++#include <gmssl/digest.h>
++#include <gmssl/error.h>
++#include <gmssl/mem.h>
++#include <gmssl/sm2.h>
++#include <gmssl/tls.h>
++
++
++#define CHECK(expr) do { \
++	if (!(expr)) { \
++		fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, #expr); \
++		return -1; \
++	} \
++} while (0)
++
++
++static int test_post_quantum_pre_shared_key_wire(void)
++{
++	static const uint8_t expected[] = { 0xff, 0x03, 0x00, 0x00 };
++	static const uint8_t nonempty[] = { 0x00 };
++	uint8_t buf[8];
++	uint8_t *p = buf;
++	const uint8_t *cp = buf;
++	const uint8_t *ext_data;
++	size_t len = 0;
++	size_t ext_datalen;
++	int ext_type;
++
++	CHECK(tls13_post_quantum_pre_shared_key_ext_to_bytes(&p, &len) == 1);
++	CHECK(len == sizeof(expected));
++	CHECK(memcmp(buf, expected, sizeof(expected)) == 0);
++	CHECK(tls_ext_from_bytes(&ext_type, &ext_data, &ext_datalen, &cp, &len) == 1);
++	CHECK(ext_type == TLS_extension_post_quantum_pre_shared_key);
++	CHECK(ext_data == NULL);
++	CHECK(ext_datalen == 0);
++	CHECK(len == 0);
++	CHECK(tls13_post_quantum_pre_shared_key_from_bytes(ext_data, ext_datalen) == 1);
++	CHECK(tls13_post_quantum_pre_shared_key_from_bytes(nonempty, sizeof(nonempty)) == -1);
++
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++static int init_pqpsk_client(TLS_CTX *ctx, TLS_CONNECT *conn,
++	const uint8_t *psk, size_t psk_len)
++{
++	static const int cipher_suites[] = { TLS_cipher_sm4_gcm_sm3 };
++	static const int groups[] = { TLS_curve_sm2p256v1 };
++	static const int sig_algs[] = { TLS_sig_sm2sig_sm3 };
++	static const uint8_t identity[] = "pqpsk-test";
++
++	memset(ctx, 0, sizeof(*ctx));
++	memset(conn, 0, sizeof(*conn));
++	if (tls_ctx_init(ctx, TLS_protocol_tls13, TLS_client_mode) != 1
++		|| tls_ctx_set_cipher_suites(ctx, cipher_suites,
++			sizeof(cipher_suites)/sizeof(cipher_suites[0])) != 1
++		|| tls_ctx_set_supported_groups(ctx, groups,
++			sizeof(groups)/sizeof(groups[0])) != 1
++		|| tls_ctx_set_signature_algorithms(ctx, sig_algs,
++			sizeof(sig_algs)/sizeof(sig_algs[0])) != 1
++		|| tls13_ctx_set_psk_key_exchange_modes(ctx, 0, 1) != 1
++		|| tls13_ctx_enable_post_quantum_pre_shared_key(ctx, 1) != 1
++		|| tls_init(conn, ctx) != 1
++		|| tls13_add_pre_shared_key(conn, identity, sizeof(identity) - 1,
++			psk, psk_len, TLS_cipher_sm4_gcm_sm3, 0) != 1
++		|| tls13_enable_pre_shared_key(conn, 1) != 1) {
++		error_print();
++		tls_cleanup(conn);
++		tls_ctx_cleanup(ctx);
++		return -1;
++	}
++	return 1;
++}
++
++
++#ifndef WIN32
++static int generate_pqpsk_client_hello(const uint8_t psk[32],
++	uint8_t *record, size_t *recordlen)
++{
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++	tls_socket_t fds[2] = { -1, -1 };
++	int ret = -1;
++
++	if (!record || !recordlen
++		|| init_pqpsk_client(&ctx, &conn, psk, 32) != 1) {
++		error_print();
++		return -1;
++	}
++	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0
++		|| tls_set_socket(&conn, fds[0]) != 1
++		|| tls13_send_client_hello(&conn) != 1
++		|| conn.plain_recordlen > TLS_MAX_RECORD_SIZE) {
++		error_print();
++		goto end;
++	}
++	memcpy(record, conn.plain_record, conn.plain_recordlen);
++	*recordlen = conn.plain_recordlen;
++	ret = 1;
++
++end:
++	if (fds[0] >= 0) {
++		tls_socket_close(fds[0]);
++	}
++	if (fds[1] >= 0) {
++		tls_socket_close(fds[1]);
++	}
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++	return ret;
++}
++
++
++static int find_client_hello_extension(uint8_t *record, int wanted_type,
++	uint8_t **wanted_data, size_t *wanted_datalen)
++{
++	int legacy_version;
++	const uint8_t *random;
++	const uint8_t *session_id;
++	size_t session_id_len;
++	const uint8_t *cipher_suites;
++	size_t cipher_suites_len;
++	const uint8_t *exts;
++	size_t exts_len;
++
++	if (tls_record_get_handshake_client_hello(record,
++		&legacy_version, &random, &session_id, &session_id_len,
++		&cipher_suites, &cipher_suites_len, &exts, &exts_len) != 1) {
++		error_print();
++		return -1;
++	}
++	while (exts_len) {
++		int ext_type;
++		const uint8_t *ext_data;
++		size_t ext_datalen;
++
++		if (tls_ext_from_bytes(&ext_type, &ext_data, &ext_datalen,
++			&exts, &exts_len) != 1) {
++			error_print();
++			return -1;
++		}
++		if (ext_type == wanted_type) {
++			*wanted_data = (uint8_t *)ext_data;
++			*wanted_datalen = ext_datalen;
++			return 1;
++		}
++	}
++	return 0;
++}
++
++
++static int init_pqpsk_server(TLS_CTX *ctx, TLS_CONNECT *conn,
++	const uint8_t psk[32])
++{
++	static const int cipher_suites[] = { TLS_cipher_sm4_gcm_sm3 };
++	static const int groups[] = { TLS_curve_sm2p256v1 };
++	static const int sig_algs[] = { TLS_sig_sm2sig_sm3 };
++	static const uint8_t identity[] = "pqpsk-test";
++
++	memset(ctx, 0, sizeof(*ctx));
++	memset(conn, 0, sizeof(*conn));
++	if (tls_ctx_init(ctx, TLS_protocol_tls13, TLS_server_mode) != 1
++		|| tls_ctx_set_cipher_suites(ctx, cipher_suites,
++			sizeof(cipher_suites)/sizeof(cipher_suites[0])) != 1
++		|| tls_ctx_set_supported_groups(ctx, groups,
++			sizeof(groups)/sizeof(groups[0])) != 1
++		|| tls_ctx_set_signature_algorithms(ctx, sig_algs,
++			sizeof(sig_algs)/sizeof(sig_algs[0])) != 1
++		|| tls13_ctx_set_psk_key_exchange_modes(ctx, 0, 1) != 1
++		|| tls13_ctx_require_post_quantum_pre_shared_key(ctx, 1) != 1
++		|| tls_init(conn, ctx) != 1
++		|| tls13_add_pre_shared_key(conn, identity, sizeof(identity) - 1,
++			psk, 32, TLS_cipher_sm4_gcm_sm3, 0) != 1
++		|| tls13_enable_pre_shared_key(conn, 1) != 1) {
++		error_print();
++		tls_cleanup(conn);
++		tls_ctx_cleanup(ctx);
++		return -1;
++	}
++	return 1;
++}
++
++
++static int test_external_psk_binder_tamper(void)
++{
++	static const uint8_t psk[32] = {
++		0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
++		0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
++		0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
++		0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
++	};
++	uint8_t record[TLS_MAX_RECORD_SIZE];
++	size_t recordlen = 0;
++	uint8_t *pre_shared_key;
++	size_t pre_shared_key_len;
++	const uint8_t *identities;
++	size_t identities_len;
++	const uint8_t *binders;
++	size_t binders_len;
++	const uint8_t *binder;
++	size_t binder_len;
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++
++	CHECK(generate_pqpsk_client_hello(psk, record, &recordlen) == 1);
++	CHECK(find_client_hello_extension(record, TLS_extension_pre_shared_key,
++		&pre_shared_key, &pre_shared_key_len) == 1);
++	CHECK(tls13_client_pre_shared_key_from_bytes(&identities, &identities_len,
++		&binders, &binders_len, pre_shared_key, pre_shared_key_len) == 1);
++	CHECK(tls_uint8array_from_bytes(&binder, &binder_len,
++		&binders, &binders_len) == 1);
++	CHECK(binder_len == 32);
++
++	CHECK(init_pqpsk_server(&ctx, &conn, psk) == 1);
++	memcpy(conn.record, record, recordlen);
++	conn.recordlen = recordlen;
++	CHECK(find_client_hello_extension(conn.record, TLS_extension_pre_shared_key,
++		&pre_shared_key, &pre_shared_key_len) == 1);
++	CHECK(tls13_process_client_pre_shared_key_external(&conn,
++		pre_shared_key, pre_shared_key_len) == 1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	/* The first byte after the binder's uint8 length is binder data. */
++	((uint8_t *)binder)[0] ^= 0x01;
++	CHECK(init_pqpsk_server(&ctx, &conn, psk) == 1);
++	memcpy(conn.record, record, recordlen);
++	conn.recordlen = recordlen;
++	CHECK(find_client_hello_extension(conn.record, TLS_extension_pre_shared_key,
++		&pre_shared_key, &pre_shared_key_len) == 1);
++	CHECK(tls13_process_client_pre_shared_key_external(&conn,
++		pre_shared_key, pre_shared_key_len) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	gmssl_secure_clear(record, sizeof(record));
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++enum CLIENT_HELLO_MUTATION {
++	REMOVE_SUPPORTED_GROUPS,
++	REMOVE_KEY_SHARE,
++	REMOVE_PSK_MODES,
++	REMOVE_PRE_SHARED_KEY,
++	PRE_SHARED_KEY_NOT_LAST,
++	ADD_EARLY_DATA,
++	PSK_KE_ONLY,
++	DUPLICATE_PQPSK,
++	NONEMPTY_PQPSK,
++};
++
++
++static int mutate_client_hello(const uint8_t *source, uint8_t *record,
++	size_t *recordlen, enum CLIENT_HELLO_MUTATION mutation)
++{
++	static const int cipher_suites[] = { TLS_cipher_sm4_gcm_sm3 };
++	int legacy_version;
++	const uint8_t *random;
++	const uint8_t *session_id;
++	size_t session_id_len;
++	const uint8_t *encoded_cipher_suites;
++	size_t encoded_cipher_suites_len;
++	const uint8_t *exts;
++	size_t exts_len;
++	uint8_t new_exts[TLS_MAX_EXTENSIONS_SIZE];
++	uint8_t *p = new_exts;
++	size_t new_exts_len = 0;
++
++	if (tls_record_get_handshake_client_hello(source,
++		&legacy_version, &random, &session_id, &session_id_len,
++		&encoded_cipher_suites, &encoded_cipher_suites_len,
++		&exts, &exts_len) != 1) {
++		error_print();
++		return -1;
++	}
++	while (exts_len) {
++		const uint8_t *raw_ext = exts;
++		int ext_type;
++		const uint8_t *ext_data;
++		size_t ext_datalen;
++		size_t raw_ext_len;
++
++		if (tls_ext_from_bytes(&ext_type, &ext_data, &ext_datalen,
++			&exts, &exts_len) != 1) {
++			error_print();
++			return -1;
++		}
++		raw_ext_len = (size_t)(exts - raw_ext);
++		if ((mutation == REMOVE_SUPPORTED_GROUPS
++				&& ext_type == TLS_extension_supported_groups)
++			|| (mutation == REMOVE_KEY_SHARE
++				&& ext_type == TLS_extension_key_share)
++			|| (mutation == REMOVE_PSK_MODES
++				&& ext_type == TLS_extension_psk_key_exchange_modes)
++			|| (mutation == REMOVE_PRE_SHARED_KEY
++				&& ext_type == TLS_extension_pre_shared_key)) {
++			continue;
++		}
++		if (mutation == NONEMPTY_PQPSK
++			&& ext_type == TLS_extension_post_quantum_pre_shared_key) {
++			const uint8_t nonempty = 0;
++			if (tls_ext_to_bytes(ext_type, &nonempty, sizeof(nonempty),
++				&p, &new_exts_len) != 1) {
++				return -1;
++			}
++			continue;
++		}
++		if (mutation == PSK_KE_ONLY
++			&& ext_type == TLS_extension_psk_key_exchange_modes) {
++			if (tls13_psk_key_exchange_modes_ext_to_bytes(TLS_KE_PSK,
++				&p, &new_exts_len) != 1) {
++				return -1;
++			}
++			continue;
++		}
++		if (ext_type == TLS_extension_pre_shared_key) {
++			if (mutation == ADD_EARLY_DATA
++				&& tls_ext_to_bytes(TLS_extension_early_data,
++					NULL, 0, &p, &new_exts_len) != 1) {
++				return -1;
++			}
++			if (mutation == DUPLICATE_PQPSK
++				&& tls13_post_quantum_pre_shared_key_ext_to_bytes(
++					&p, &new_exts_len) != 1) {
++				return -1;
++			}
++		}
++		memcpy(p, raw_ext, raw_ext_len);
++		p += raw_ext_len;
++		new_exts_len += raw_ext_len;
++		if (mutation == PRE_SHARED_KEY_NOT_LAST
++			&& ext_type == TLS_extension_pre_shared_key
++			&& tls_ext_to_bytes(TLS_extension_post_handshake_auth,
++				NULL, 0, &p, &new_exts_len) != 1) {
++			return -1;
++		}
++	}
++
++	memset(record, 0, TLS_MAX_RECORD_SIZE);
++	*recordlen = 0;
++	if (tls_record_set_protocol(record, TLS_protocol_tls1) != 1) {
++		return -1;
++	}
++	return tls_record_set_handshake_client_hello(record, recordlen,
++		legacy_version, random, session_id, session_id_len,
++		cipher_suites, sizeof(cipher_suites)/sizeof(cipher_suites[0]),
++		new_exts, new_exts_len);
++}
++
++
++static int server_rejects_client_hello(const uint8_t *record, size_t recordlen,
++	const uint8_t psk[32])
++{
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++	tls_socket_t fds[2] = { -1, -1 };
++	int ret = -1;
++
++	if (init_pqpsk_server(&ctx, &conn, psk) != 1) {
++		return -1;
++	}
++	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0
++		|| tls_set_socket(&conn, fds[1]) != 1
++		|| tls_socket_send(fds[0], record, recordlen, 0) != (tls_ret_t)recordlen) {
++		error_print();
++		goto end;
++	}
++	ret = tls13_recv_client_hello(&conn) == -1 ? 1 : -1;
++
++end:
++	if (fds[0] >= 0) {
++		tls_socket_close(fds[0]);
++	}
++	if (fds[1] >= 0) {
++		tls_socket_close(fds[1]);
++	}
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++	return ret;
++}
++
++
++static int test_malformed_client_hello_rejections(void)
++{
++	static const uint8_t psk[32] = { 0x5a };
++	static const enum CLIENT_HELLO_MUTATION mutations[] = {
++		REMOVE_SUPPORTED_GROUPS,
++		REMOVE_KEY_SHARE,
++		REMOVE_PSK_MODES,
++		REMOVE_PRE_SHARED_KEY,
++		PRE_SHARED_KEY_NOT_LAST,
++		ADD_EARLY_DATA,
++		PSK_KE_ONLY,
++		DUPLICATE_PQPSK,
++		NONEMPTY_PQPSK,
++	};
++	uint8_t source[TLS_MAX_RECORD_SIZE];
++	uint8_t record[TLS_MAX_RECORD_SIZE];
++	size_t source_len = 0;
++	size_t recordlen;
++	size_t i;
++
++	CHECK(generate_pqpsk_client_hello(psk, source, &source_len) == 1);
++	for (i = 0; i < sizeof(mutations)/sizeof(mutations[0]); i++) {
++		CHECK(mutate_client_hello(source, record, &recordlen,
++			mutations[i]) == 1);
++		CHECK(server_rejects_client_hello(record, recordlen, psk) == 1);
++	}
++	gmssl_secure_clear(source, sizeof(source));
++	gmssl_secure_clear(record, sizeof(record));
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++static int test_unsolicited_server_hello_extension(void)
++{
++	static const uint8_t psk[32] = { 0xa5 };
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++	tls_socket_t fds[2] = { -1, -1 };
++	uint8_t exts[16];
++	uint8_t *p = exts;
++	size_t extslen = 0;
++	uint8_t random[32] = { 1 };
++	uint8_t server_hello[TLS_MAX_RECORD_SIZE];
++	size_t server_hello_len = 0;
++	int ret = -1;
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	ctx.post_quantum_pre_shared_key = 0;
++	ctx.require_post_quantum_pre_shared_key = 0;
++	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0
++		|| tls_set_socket(&conn, fds[0]) != 1
++		|| tls13_send_client_hello(&conn) != 1
++		|| tls13_server_supported_versions_ext_to_bytes(TLS_protocol_tls13,
++			&p, &extslen) != 1
++		|| tls13_post_quantum_pre_shared_key_ext_to_bytes(&p, &extslen) != 1
++		|| tls_record_set_protocol(server_hello, TLS_protocol_tls12) != 1
++		|| tls_record_set_handshake_server_hello(server_hello, &server_hello_len,
++			TLS_protocol_tls12, random, NULL, 0,
++			TLS_cipher_sm4_gcm_sm3, exts, extslen) != 1
++		|| tls_socket_send(fds[1], server_hello, server_hello_len, 0)
++			!= (tls_ret_t)server_hello_len) {
++		error_print();
++		goto end;
++	}
++	if (tls13_recv_server_hello(&conn) != -1) {
++		error_print();
++		goto end;
++	}
++	ret = 1;
++
++end:
++	if (fds[0] >= 0) {
++		tls_socket_close(fds[0]);
++	}
++	if (fds[1] >= 0) {
++		tls_socket_close(fds[1]);
++	}
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++	if (ret == 1) {
++		printf("%s() ok\n", __FUNCTION__);
++	}
++	return ret;
++}
++
++
++static int test_client_hello_extensions(void)
++{
++	static const uint8_t psk[32] = {
++		0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
++		0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
++		0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
++		0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
++	};
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++	tls_socket_t fds[2] = { -1, -1 };
++	int legacy_version;
++	const uint8_t *random;
++	const uint8_t *session_id;
++	size_t session_id_len;
++	const uint8_t *cipher_suites;
++	size_t cipher_suites_len;
++	const uint8_t *exts;
++	size_t exts_len;
++	int saw_supported_groups = 0;
++	int saw_key_share = 0;
++	int saw_psk_modes = 0;
++	int saw_pqpsk = 0;
++	int saw_pre_shared_key = 0;
++	int psk_modes = 0;
++	int ret = -1;
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0
++		|| tls_set_socket(&conn, fds[0]) != 1
++		|| tls13_send_client_hello(&conn) != 1) {
++		error_print();
++		goto end;
++	}
++	if (tls_record_get_handshake_client_hello(conn.plain_record,
++		&legacy_version, &random, &session_id, &session_id_len,
++		&cipher_suites, &cipher_suites_len, &exts, &exts_len) != 1) {
++		error_print();
++		goto end;
++	}
++	while (exts_len) {
++		int ext_type;
++		const uint8_t *ext_data;
++		size_t ext_datalen;
++
++		if (tls_ext_from_bytes(&ext_type, &ext_data, &ext_datalen,
++			&exts, &exts_len) != 1) {
++			error_print();
++			goto end;
++		}
++		switch (ext_type) {
++		case TLS_extension_supported_groups:
++			saw_supported_groups++;
++			break;
++		case TLS_extension_key_share:
++			saw_key_share++;
++			break;
++		case TLS_extension_psk_key_exchange_modes:
++			saw_psk_modes++;
++			if (tls13_psk_key_exchange_modes_from_bytes(&psk_modes,
++				ext_data, ext_datalen) != 1) {
++				goto end;
++			}
++			break;
++		case TLS_extension_post_quantum_pre_shared_key:
++			saw_pqpsk++;
++			if (tls13_post_quantum_pre_shared_key_from_bytes(
++				ext_data, ext_datalen) != 1) {
++				goto end;
++			}
++			break;
++		case TLS_extension_pre_shared_key:
++			saw_pre_shared_key++;
++			/* RFC 8446 requires pre_shared_key to be last. */
++			if (exts_len != 0) {
++				goto end;
++			}
++			break;
++		default:
++			break;
++		}
++	}
++	if (legacy_version != TLS_protocol_tls12 || !random || !cipher_suites
++		|| !cipher_suites_len || saw_supported_groups != 1
++		|| saw_key_share != 1 || saw_psk_modes != 1
++		|| !(psk_modes & TLS_KE_PSK_DHE) || saw_pqpsk != 1
++		|| saw_pre_shared_key != 1 || !conn.post_quantum_psk_offered) {
++		error_print();
++		goto end;
++	}
++	ret = 1;
++
++end:
++	if (fds[0] >= 0) {
++		tls_socket_close(fds[0]);
++	}
++	if (fds[1] >= 0) {
++		tls_socket_close(fds[1]);
++	}
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++	if (ret == 1) {
++		printf("%s() ok\n", __FUNCTION__);
++	}
++	return ret;
++}
++
++
++static int protected_server_record_is_rejected(const uint8_t *plain_record,
++	size_t plain_record_len, int (*recv_func)(TLS_CONNECT *))
++{
++	static const uint8_t psk[32] = { 0x3c };
++	static const uint8_t raw_key[16] = { 0x7d };
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++	tls_socket_t fds[2] = { -1, -1 };
++	uint8_t record[TLS_MAX_RECORD_SIZE];
++	size_t recordlen = 0;
++	int ret = -1;
++
++	if (!plain_record || !plain_record_len || !recv_func
++		|| init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) != 1) {
++		error_print();
++		return -1;
++	}
++	conn.cipher_suite = TLS_cipher_sm4_gcm_sm3;
++	conn.digest = DIGEST_sm3();
++	conn.post_quantum_psk_negotiated = 1;
++	if (digest_init(&conn.dgst_ctx, conn.digest) != 1
++		|| block_cipher_set_encrypt_key(&conn.server_write_key,
++			BLOCK_CIPHER_sm4(), raw_key) != 1
++		|| tls13_record_encrypt(conn.cipher_suite, &conn.server_write_key,
++			conn.server_write_iv, conn.server_seq_num,
++			plain_record, plain_record_len, 0, record, &recordlen) != 1
++		|| socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0
++		|| tls_set_socket(&conn, fds[0]) != 1
++		|| tls_socket_send(fds[1], record, recordlen, 0)
++			!= (tls_ret_t)recordlen) {
++		error_print();
++		goto end;
++	}
++	ret = recv_func(&conn) == -1 ? 1 : -1;
++
++end:
++	if (fds[0] >= 0) {
++		tls_socket_close(fds[0]);
++	}
++	if (fds[1] >= 0) {
++		tls_socket_close(fds[1]);
++	}
++	gmssl_secure_clear(record, sizeof(record));
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++	return ret;
++}
++
++
++static int test_illegal_message_and_missing_certificate(void)
++{
++	uint8_t exts[8];
++	uint8_t *p = exts;
++	size_t extslen = 0;
++	uint8_t record[TLS_MAX_RECORD_SIZE] = {0};
++	size_t recordlen = 0;
++	uint8_t verify_data[32] = {0};
++
++	CHECK(tls13_post_quantum_pre_shared_key_ext_to_bytes(&p, &extslen) == 1);
++	CHECK(tls_record_set_protocol(record, TLS_protocol_tls12) == 1);
++	CHECK(tls13_record_set_handshake_encrypted_extensions(record, &recordlen,
++		exts, extslen) == 1);
++	CHECK(protected_server_record_is_rejected(record, recordlen,
++		tls13_recv_encrypted_extensions) == 1);
++
++	memset(record, 0, sizeof(record));
++	recordlen = 0;
++	CHECK(tls_record_set_protocol(record, TLS_protocol_tls12) == 1);
++	CHECK(tls13_record_set_handshake_finished(record, &recordlen,
++		verify_data, sizeof(verify_data)) == 1);
++	CHECK(protected_server_record_is_rejected(record, recordlen,
++		tls13_recv_server_certificate) == 1);
++
++	gmssl_secure_clear(record, sizeof(record));
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++#endif
++
++
++static int test_client_configuration_rejections(void)
++{
++	static const uint8_t psk[32] = { 1 };
++	TLS_CTX ctx;
++	TLS_CONNECT conn;
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	conn.early_data = 1;
++	CHECK(tls13_send_client_hello(&conn) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	conn.key_exchange_modes &= ~TLS_KE_PSK_DHE;
++	CHECK(tls13_send_client_hello(&conn) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	conn.key_share = 0;
++	CHECK(tls13_send_client_hello(&conn) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	conn.pre_shared_key = 0;
++	CHECK(tls13_send_client_hello(&conn) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	CHECK(init_pqpsk_client(&ctx, &conn, psk, sizeof(psk)) == 1);
++	conn.psk_identity_types[0] = TLS13_PSK_IDENTITY_RESUMPTION;
++	CHECK(tls13_send_client_hello(&conn) == -1);
++	tls_cleanup(&conn);
++	tls_ctx_cleanup(&ctx);
++
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++typedef struct {
++	uint8_t early_secret[32];
++	uint8_t handshake_secret[32];
++	uint8_t master_secret[32];
++	uint8_t application_secret[32];
++} TEST_SECRETS;
++
++
++static int derive_test_secrets(const uint8_t psk[32],
++	const uint8_t ecdhe[32], TEST_SECRETS *secrets)
++{
++	static const uint8_t transcript[] = "ClientHello || ServerHello";
++	const uint8_t zeros[32] = {0};
++	uint8_t derived[32];
++	DIGEST_CTX empty_ctx;
++	DIGEST_CTX transcript_ctx;
++	const DIGEST *digest = DIGEST_sm3();
++
++	if (digest_init(&empty_ctx, digest) != 1
++		|| digest_init(&transcript_ctx, digest) != 1
++		|| digest_update(&transcript_ctx, transcript, sizeof(transcript) - 1) != 1
++		|| tls13_hkdf_extract(digest, zeros, psk, secrets->early_secret) != 1
++		|| tls13_derive_secret(secrets->early_secret, "derived",
++			&empty_ctx, derived) != 1
++		|| tls13_hkdf_extract(digest, derived, ecdhe,
++			secrets->handshake_secret) != 1
++		|| tls13_derive_secret(secrets->handshake_secret, "derived",
++			&empty_ctx, secrets->master_secret) != 1
++		|| tls13_hkdf_extract(digest, secrets->master_secret, zeros,
++			secrets->master_secret) != 1
++		|| tls13_derive_secret(secrets->master_secret, "s ap traffic",
++			&transcript_ctx, secrets->application_secret) != 1) {
++		gmssl_secure_clear(derived, sizeof(derived));
++		error_print();
++		return -1;
++	}
++	gmssl_secure_clear(derived, sizeof(derived));
++	return 1;
++}
++
++
++static int test_psk_and_ecdhe_enter_key_schedule(void)
++{
++	uint8_t psk_a[32] = { 0x11 };
++	uint8_t psk_b[32] = { 0x22 };
++	uint8_t ecdhe_a[32] = { 0x33 };
++	uint8_t ecdhe_b[32] = { 0x44 };
++	TEST_SECRETS aa;
++	TEST_SECRETS ba;
++	TEST_SECRETS ab;
++
++	CHECK(derive_test_secrets(psk_a, ecdhe_a, &aa) == 1);
++	CHECK(derive_test_secrets(psk_b, ecdhe_a, &ba) == 1);
++	CHECK(derive_test_secrets(psk_a, ecdhe_b, &ab) == 1);
++	CHECK(memcmp(aa.early_secret, ba.early_secret, 32) != 0);
++	CHECK(memcmp(aa.handshake_secret, ba.handshake_secret, 32) != 0);
++	CHECK(memcmp(aa.master_secret, ba.master_secret, 32) != 0);
++	CHECK(memcmp(aa.application_secret, ba.application_secret, 32) != 0);
++	CHECK(memcmp(aa.early_secret, ab.early_secret, 32) == 0);
++	CHECK(memcmp(aa.handshake_secret, ab.handshake_secret, 32) != 0);
++	CHECK(memcmp(aa.master_secret, ab.master_secret, 32) != 0);
++	CHECK(memcmp(aa.application_secret, ab.application_secret, 32) != 0);
++
++	gmssl_secure_clear(&aa, sizeof(aa));
++	gmssl_secure_clear(&ba, sizeof(ba));
++	gmssl_secure_clear(&ab, sizeof(ab));
++	gmssl_secure_clear(psk_a, sizeof(psk_a));
++	gmssl_secure_clear(psk_b, sizeof(psk_b));
++	gmssl_secure_clear(ecdhe_a, sizeof(ecdhe_a));
++	gmssl_secure_clear(ecdhe_b, sizeof(ecdhe_b));
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++static int test_certificate_verify_tamper(void)
++{
++	static const uint8_t transcript[] = "0xFF03 authenticated transcript";
++	SM2_KEY sm2_key;
++	X509_KEY x509_key;
++	DIGEST_CTX transcript_ctx;
++	uint8_t sig[SM2_MAX_SIGNATURE_SIZE];
++	size_t siglen = 0;
++
++	memset(&sm2_key, 0, sizeof(sm2_key));
++	memset(&x509_key, 0, sizeof(x509_key));
++	CHECK(sm2_key_generate(&sm2_key) == 1);
++	CHECK(x509_key_set_sm2_key(&x509_key, &sm2_key) == 1);
++	CHECK(digest_init(&transcript_ctx, DIGEST_sm3()) == 1);
++	CHECK(digest_update(&transcript_ctx, transcript,
++		sizeof(transcript) - 1) == 1);
++	CHECK(tls13_sign_certificate_verify(TLS_server_mode, TLS_sig_sm2sig_sm3,
++		&x509_key, &transcript_ctx, sig, &siglen) == 1);
++	CHECK(tls13_verify_certificate_verify(TLS_server_mode, TLS_sig_sm2sig_sm3,
++		&x509_key, &transcript_ctx, sig, siglen) == 1);
++	sig[siglen - 1] ^= 0x01;
++	CHECK(tls13_verify_certificate_verify(TLS_server_mode, TLS_sig_sm2sig_sm3,
++		&x509_key, &transcript_ctx, sig, siglen) != 1);
++
++	gmssl_secure_clear(sig, sizeof(sig));
++	x509_key_cleanup(&x509_key);
++	gmssl_secure_clear(&sm2_key, sizeof(sm2_key));
++	printf("%s() ok\n", __FUNCTION__);
++	return 1;
++}
++
++
++int main(void)
++{
++	if (test_post_quantum_pre_shared_key_wire() != 1
++#ifndef WIN32
++		|| test_client_hello_extensions() != 1
++		|| test_external_psk_binder_tamper() != 1
++		|| test_malformed_client_hello_rejections() != 1
++		|| test_unsolicited_server_hello_extension() != 1
++		|| test_illegal_message_and_missing_certificate() != 1
++#endif
++		|| test_client_configuration_rejections() != 1
++		|| test_psk_and_ecdhe_enter_key_schedule() != 1
++		|| test_certificate_verify_tamper() != 1) {
++		return 1;
++	}
++	printf("%s all tests passed\n", __FILE__);
++	return 0;
++}
+diff --git a/tools/tls13_client.c b/tools/tls13_client.c
+index 94d5d9bef2c720140d54eed793e92a7b2b8d9b7f..45f17f428746f8ea8283ac707308203333e9256d 100644
+--- a/tools/tls13_client.c
++++ b/tools/tls13_client.c
+@@ -197,6 +197,8 @@ static const char *help =
+ "    -psk_identity str         PSK Identity\n"
+ "    -psk_cipher_suite str     PSK cipher suite\n"
+ "    -psk_key hex              PSK key in HEX format, of PSK hash length\n"
++"    -post_quantum_pre_shared_key  Enable private 0xFF03 Certificate + External PSK + (EC)DHE mode\n"
++"    -require_post_quantum_pre_shared_key  Fail instead of certificate-only fallback\n"
+ "    -sess_in                  Load server's session ticket file\n"
+ "    -sess_out                 Save server's session ticket file\n"
+ "    -early_data file          Send early data, -psk_ke and/or -psk_dhe_ke should be set\n"
+@@ -283,6 +285,8 @@ int tls13_client_main(int argc, char *argv[])
+ 	// psk_key_exchange_modes
+ 	int psk_ke = 0;
+ 	int psk_dhe_ke = 0;
++	int post_quantum_pre_shared_key = 0;
++	int require_post_quantum_pre_shared_key = 0;
+ 
+ 	// pre_shared_key from NewSessionTicket
+ 	char *sess_in = NULL;
+@@ -391,6 +395,11 @@ int tls13_client_main(int argc, char *argv[])
+ 			psk_ke = 1;
+ 		} else if (!strcmp(*argv, "-psk_dhe_ke")) {
+ 			psk_dhe_ke = 1;
++		} else if (!strcmp(*argv, "-post_quantum_pre_shared_key")) {
++			post_quantum_pre_shared_key = 1;
++		} else if (!strcmp(*argv, "-require_post_quantum_pre_shared_key")) {
++			post_quantum_pre_shared_key = 1;
++			require_post_quantum_pre_shared_key = 1;
+ 		} else if (!strcmp(*argv, "-psk_identity")) {
+ 			if (psk_identities_cnt >= sizeof(psk_identities)/sizeof(psk_identities[0])) {
+ 				fprintf(stderr, "%s: too many -psk_identity options\n", prog);
+@@ -421,7 +430,7 @@ int tls13_client_main(int argc, char *argv[])
+ 			if (--argc < 1) goto bad;
+ 			psk_key_hex = *(++argv);
+ 			if (strlen(psk_key_hex) != 64) {
+-				fprintf(stderr, "%s: invalid -psk_key '%s' length\n", prog, psk_key_hex);
++				fprintf(stderr, "%s: invalid -psk_key length\n", prog);
+ 				return -1;
+ 			}
+ 			psk_keys[psk_keys_cnt++] = psk_key_hex;
+@@ -589,6 +598,16 @@ bad:
+ 			goto end;
+ 		}
+ 	}
++	if (post_quantum_pre_shared_key
++		&& tls13_ctx_enable_post_quantum_pre_shared_key(&ctx, 1) != 1) {
++		error_print();
++		goto end;
++	}
++	if (require_post_quantum_pre_shared_key
++		&& tls13_ctx_require_post_quantum_pre_shared_key(&ctx, 1) != 1) {
++		error_print();
++		goto end;
++	}
+ 
+ 	// KeyUpdate
+ 	if (key_update_seq_num > 0) {
+@@ -705,9 +724,11 @@ bad:
+ 			}
+ 			if (tls13_add_pre_shared_key(&conn, (uint8_t *)psk_identities[i], strlen(psk_identities[i]),
+ 				psk_key, psk_key_len, psk_cipher_suites[i], obfuscated_ticket_age) != 1) {
++				gmssl_secure_clear(psk_key, sizeof(psk_key));
+ 				error_print();
+ 				goto end;
+ 			}
++			gmssl_secure_clear(psk_key, sizeof(psk_key));
+ 		}
+ 
+ 		tls13_enable_pre_shared_key(&conn, 1);
+diff --git a/tools/tls13_server.c b/tools/tls13_server.c
+index fd23156511b6dc6c9de122d84d9d01d2a223f45a..73f29801145e6f3b3e0bf8a424d1ae540d99e307 100644
+--- a/tools/tls13_server.c
++++ b/tools/tls13_server.c
+@@ -42,6 +42,8 @@ static const char *help =
+ "    -psk_identity str         PSK Identity\n"
+ "    -psk_cipher_suite str     PSK cipher suite\n"
+ "    -psk_key hex              PSK key in HEX format, of PSK hash length\n"
++"    -post_quantum_pre_shared_key  Enable private 0xFF03 Certificate + External PSK + (EC)DHE mode\n"
++"    -require_post_quantum_pre_shared_key  Fail instead of certificate-only fallback\n"
+ "    -early_data               Accept EarlyData, support 0-RTT\n"
+ "    -max_early_data_size num  Set extension max_early_data_size\n"
+ "    -new_session_ticket num   Send NewSessionTicket <num> times\n"
+@@ -151,6 +153,8 @@ int tls13_server_main(int argc , char **argv)
+ 	// psk_key_exchange_modes
+ 	int psk_ke = 0;
+ 	int psk_dhe_ke = 0;
++	int post_quantum_pre_shared_key = 0;
++	int require_post_quantum_pre_shared_key = 0;
+ 
+ 	// pre_shared_key from external
+ 	char *psk_identities[16];
+@@ -255,6 +259,11 @@ int tls13_server_main(int argc , char **argv)
+ 			psk_ke = 1;
+ 		} else if (!strcmp(*argv, "-psk_dhe_ke")) {
+ 			psk_dhe_ke = 1;
++		} else if (!strcmp(*argv, "-post_quantum_pre_shared_key")) {
++			post_quantum_pre_shared_key = 1;
++		} else if (!strcmp(*argv, "-require_post_quantum_pre_shared_key")) {
++			post_quantum_pre_shared_key = 1;
++			require_post_quantum_pre_shared_key = 1;
+ 		} else if (!strcmp(*argv, "-psk_identity")) {
+ 			if (--argc < 1) goto bad;
+ 			if (psk_identities_cnt >= sizeof(psk_identities)/sizeof(psk_identities[0])) {
+@@ -453,6 +462,16 @@ bad:
+ 			goto end;
+ 		}
+ 	}
++	if (post_quantum_pre_shared_key
++		&& tls13_ctx_enable_post_quantum_pre_shared_key(&ctx, 1) != 1) {
++		error_print();
++		goto end;
++	}
++	if (require_post_quantum_pre_shared_key
++		&& tls13_ctx_require_post_quantum_pre_shared_key(&ctx, 1) != 1) {
++		error_print();
++		goto end;
++	}
+ 
+ 	// NewSessionTicket
+ 	if (new_session_ticket > 0) {
+@@ -592,9 +611,11 @@ bad:
+ 			}
+ 			if (tls13_add_pre_shared_key(&conn, (uint8_t *)psk_identities[i], strlen(psk_identities[i]),
+ 				psk_key, psk_key_len, psk_cipher_suite, obfuscated_ticket_age) != 1) {
++				gmssl_secure_clear(psk_key, sizeof(psk_key));
+ 				error_print();
+ 				goto end;
+ 			}
++			gmssl_secure_clear(psk_key, sizeof(psk_key));
+ 		}
+ 
+ 		tls13_enable_pre_shared_key(&conn, 1);

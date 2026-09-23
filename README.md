@@ -36,10 +36,14 @@ FIPS 204 参数集。
 - TLCP encryption certificate 保持普通 SM2 SPKI，同时使用 Hybrid CA 的
   SM2 + Dilithium2 Composite certificate signature；两张实体证书都必须严格
   双验证通过。
+- TLS 1.3 实验性私有 `post_quantum_pre_shared_key`（`0xFF03`）：复用标准
+  external PSK identity/binder 与 selected_identity，强制 PSK-DHE，并保留
+  Server Certificate/CertificateVerify 身份认证。
 
 当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP
-PQKEX 握手、TLS 握手或 `post-quantum_pre_shared_key`。目前的 PQKEX 仅完成
-ClientHello capability advertisement 和 server-side KEM selection。
+PQKEX 握手或 ML-KEM 到 TLS/TLCP secret 的接入。目前的 PQKEX 仅完成
+ClientHello capability advertisement 和 server-side KEM selection；TLS 1.3
+`0xFF03` 只消费握手前已安全配置的 external PSK，不调用 ML-KEM。
 
 ## 实现路线图
 
@@ -51,7 +55,7 @@ ClientHello capability advertisement 和 server-side KEM selection。
 5. GM/T 0024 PQKEX capability 与 KEM 选择            ✅
    6A. TLCP Composite signing certificate           ✅
    6B. TLCP encryption certificate Composite-sign   ✅
-7. TLS 1.3 PQ-PSK extension                        ⬜
+7. TLS 1.3 PQ-PSK extension                        ✅
 8. 性能 < 50 ms                                     ✅
 9. QROM 安全论证                                    ⬜
 10. 经典/量子侧信道防护方案                           ⬜
@@ -322,6 +326,97 @@ ClientKeyExchange: ML-KEM-768 ciphertext
 `draft-campagna-tls-bike-sike-hybrid`，本项目不声称符合该 draft，也不声称这是
 GM/T 正式定义的 PQKEX。
 
+## TLS 1.3 post_quantum_pre_shared_key
+
+本项目定义实验性 TLS 1.3 私有扩展 `post_quantum_pre_shared_key`（`0xFF03`）。
+其协议行为参考 RFC 9973 `tls_cert_with_extern_psk`，但 `0xFF03` 并非
+RFC 9973 或 IANA 正式分配的扩展标识。
+
+> This project defines a private-use TLS 1.3 extension named
+> post_quantum_pre_shared_key with ExtensionType 0xFF03. Its behavior is
+> modeled after RFC 9973 tls_cert_with_extern_psk, but 0xFF03 is not an
+> IANA-assigned RFC 9973 extension.
+
+该扩展保存在新的、按顺序应用的 GmSSL 增量补丁中：
+
+```text
+patches/gmssl/0004-add-tls13-post-quantum-pre-shared-key.patch
+```
+
+`post_quantum_pre_shared_key` 自身只是空 flag，固定 wire 编码为：
+
+```text
+FF 03 00 00
+```
+
+真实 PSK 从不在 `0xFF03` 或其他握手字段中传输。ClientHello 与 ServerHello
+继续复用 TLS 1.3 标准 `pre_shared_key`：客户端发送 identity 与 external binder，
+服务端返回 selected_identity。ClientHello 中 `pre_shared_key` 保持最后一个
+extension；`0xFF03` 还要求 `supported_groups`、`key_share` 和包含 `psk_dhe_ke`
+的 `psk_key_exchange_modes`，并拒绝 early_data、PSK-only 与 resumption PSK。
+
+成功协商后的实际安全结构是：
+
+```text
+pre-provisioned external PSK -> Early Secret
+                                    |
+                                    + derived secret
+                                    + ECDHE shared secret
+                                    v
+                              Handshake Secret
+                                    |
+                                    v
+                     Master/Application Traffic Secrets
+
+Server identity authentication: Certificate + CertificateVerify
+```
+
+因此此模式不是 PSK-only authentication：即使 external PSK 被选中，服务端仍发送
+Certificate 与 CertificateVerify，客户端仍执行证书链和签名验证。默认 compatible
+模式在 identity 无匹配时回退到普通 certificate-authenticated TLS 1.3；双方也可用
+`-require_post_quantum_pre_shared_key` 开启 strict 模式。HelloRetryRequest 后的
+ClientHello2 会重复 `0xFF03`、保持 `pre_shared_key` 最后，并使用原 TLS 1.3 HRR
+transcript 逻辑重新计算 binder。
+
+演示命令复用 GmSSL 原有 `-psk_identity`、`-psk_cipher_suite` 和 `-psk_key`：
+
+```sh
+gmssl tls13_server ... \
+  -psk_dhe_ke \
+  -psk_identity pq-demo \
+  -psk_cipher_suite TLS_SM4_GCM_SM3 \
+  -psk_key <hex> \
+  -post_quantum_pre_shared_key
+
+gmssl tls13_client ... \
+  -psk_dhe_ke \
+  -psk_identity pq-demo \
+  -psk_cipher_suite TLS_SM4_GCM_SM3 \
+  -psk_key <same-hex> \
+  -post_quantum_pre_shared_key
+```
+
+命令行 PSK 只用于演示和测试，因为进程列表或 shell history 可能暴露参数。正式
+部署应从受保护配置、secure file、keystore 或硬件保护的 provisioning 载入；PSK
+如何生成、分发和保存不属于本阶段范围。这里的“post-quantum”属性依赖 PSK 本身
+具有足够熵，并通过抗量子安全的流程配置和保存；external PSK 不是一种 PQC 算法。
+
+固定测试使用 `TLS_SM4_GCM_SM3`，所以 PSK 关联 hash 与 TLS 1.3 HKDF hash 都是
+SM3（32 bytes）。这只是当前 cipher suite 的既有约束，不把协议概念写死为所有
+external PSK 均为 32 bytes。`tls13pqpsktest` 覆盖 wire、ClientHello companions、
+binder tamper、错误/重复/非空扩展、early_data、PSK-only、resumption type、
+unsolicited ServerHello、EncryptedExtensions 非法位置、缺失 Certificate、篡改
+CertificateVerify，以及 PSK/ECDHE 对 key schedule 的独立影响；命令测试覆盖完整
+握手、Certificate/CertificateVerify trace、application data、错误 PSK、identity
+compatible/strict 策略和 HRR。普通 certificate、PSK-DHE、PSK-only、
+resumption/early-data 路径在未启用 `0xFF03` 时保持原语义。
+
+该 TLS 1.3 功能与 TLCP `PQKEX 0xFF02`、ML-KEM primitive 和 Composite X.509
+相互独立：它不协商或调用 ML-KEM，不修改 TLCP master secret，也不把现有 TLCP
+Composite certificate 强行接入 GmSSL TLS 1.3 certificate flow。完整课题设计中，
+strong external PSK 可增强 session-key confidentiality，而 SM2 + Dilithium2
+Composite Signature 负责 authentication；两项实验可分别验证。
+
 ## Experimental TLCP Hybrid Certificate
 
 相关 GmSSL 增量补丁位于：
@@ -480,10 +575,13 @@ ASAN_OPTIONS=detect_leaks=0 \
   ctest --test-dir build-sanitize --output-on-failure
 ```
 
-主项目也可将 `detect_leaks` 设为 `1`，当前 12 项测试无泄漏。patched GmSSL
-集成测试启用 ASan 和 UBSan 时需对未修改的上游 SM4 `GETU32/S32` signed-shift
-报告使用 `-fno-sanitize=shift`；其余 UBSan 检查和 LeakSanitizer 保持启用。本项目
-不在 0003 中夹带修复该上游、非证书路径问题。
+主项目也可将 `detect_leaks` 设为 `1`，当前 13 项测试无泄漏。patched GmSSL
+启用 ASan 和 UBSan 时需对未修改的上游 SM4 `GETU32/S32` signed-shift 报告使用
+`-fno-sanitize=shift`。`tls13pqpsktest` 可保持 LeakSanitizer 开启；TLS 1.3 CLI
+回归的证书夹具需使用 `detect_leaks=0`，因为固定上游 `reqsign` 的
+`x509_cert_new_from_file()` 存在 565-byte 泄漏。固定上游 `x509_crltest` 另有
+与本阶段无关的 zero-length/null-pointer UBSan 报告。本项目不在增量 GmSSL 补丁
+中夹带修复这些非 TLS 1.3 PQ-PSK 路径的问题。
 
 ## Performance Benchmark
 
