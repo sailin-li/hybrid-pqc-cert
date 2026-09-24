@@ -1,637 +1,174 @@
 # hybrid-pqc-cert
 
-本项目实现一个两级实验 PKI：Root CA 和 Server 均使用单一 Composite
-X.509 算法标识，组件为 SM2/SM3 与官方 reference
-CRYSTALS-Dilithium2。项目另有一个完全独立的 FIPS 203 ML-KEM-768
-primitive wrapper，用于验证 KeyGen、Encaps 和 Decaps；它尚未接入协议层。
+*Experimental hybrid post-quantum certificates for Chinese commercial cryptography.*
+
+`hybrid-pqc-cert` 是“国密证书支持抗量子算法方案设计”的实验项目。项目以
+SM2/SM3 与官方 `pq-crystals/dilithium` reference implementation 的
+CRYSTALS-Dilithium2 构造 Composite Signature 和两级 X.509 证书链；相互隔离的
+模块另验证 ML-KEM-768 primitive、TLCP capability/证书接入与 TLS 1.3 external
+PSK 实验方案。
 
 > Experimental SM2 + CRYSTALS-Dilithium adaptation based on
 > draft-ietf-lamps-pq-composite-sigs-19.
 
-本实现只参考该草案的 Composite 架构、消息组合和序列化思想；草案定义的是
-ML-DSA 与 ECDSA/RSA/EdDSA 的组合，不包含 SM2 或 CRYSTALS-Dilithium，因而
-本项目**不符合且不声称符合**该草案。项目不使用 ML-DSA、liboqs ML-DSA 或
-FIPS 204 参数集。
+该 draft 不定义 SM2 + CRYSTALS-Dilithium。本项目只参考其 Composite 架构、消息
+组合与序列化思想，不声称符合该 draft，也不使用 ML-DSA 替代 Dilithium2。
 
-## 当前范围
+## Features
 
-已实现：
+- **SM2 + CRYSTALS-Dilithium2 Composite Signature**：统一 core 构造消息并执行
+  双组件签名与严格 `DilithiumValid && SM2Valid` 验证。
+- **Hybrid X.509 Certificate**：Root CA 与 Server signing certificate 使用
+  Composite SPKI 和 Composite issuer signature，支持两级链与负向验证。
+- **FIPS 203 ML-KEM-768**：基于固定 liboqs 的独立 KeyGen、Encaps、Decaps
+  primitive，包含 implicit rejection 与 NIST ACVP KAT。
+- **TLCP PQKEX capability**：通过 GmSSL 补丁在 ClientHello 发布 KEM capability，
+  服务端按客户端偏好选择 KEM；尚未执行 ML-KEM key establishment。
+- **TLCP Hybrid Certificate Verification**：signing certificate 使用 Composite
+  SPKI；encryption certificate 保持 ordinary SM2 SPKI，其 CA signature 为
+  Composite。
+- **TLS 1.3 `post_quantum_pre_shared_key`**：私有 `0xFF03` flag 复用标准 external
+  PSK binder 与 PSK-DHE，同时保留 Certificate 和 CertificateVerify。
+- **Performance benchmark**：以 ECDSA-P256-SHA256 为 baseline 测量完整公开
+  `composite_verify()` 路径。
+- **Security / negative testing**：覆盖严格解析、downgrade、证书篡改、ML-KEM
+  错误输入、协议负向场景，以及 ASan/UBSan 回归。
 
-- OpenSSL 3.2.0 EVP SM2/SM3 primitive；
-- 官方 `pq-crystals/dilithium/ref`、`DILITHIUM_MODE=2`；
-- 唯一的 Composite Signature Core；
-- Composite 公钥、签名的 raw concat 编解码与严格检查；
-- 自签 Root Hybrid CA；
-- Root CA 签发 Server Hybrid Certificate；
-- Root → Server 两级链与严格 `DilithiumValid && SM2Valid` 验证；
-- CA/Server Hybrid Private Key 加密持久化、加载及证书 SPKI 匹配检查；
-- 正向、primitive 反向和 12 个证书链反向测试；
-- PEM/DER 证书生成、检查和详细链验证工具；
-- FIPS 203 ML-KEM-768 KeyGen、Encaps、Decaps wrapper；
-- ML-KEM 正向、输入错误、implicit rejection 和 NIST ACVP 对照测试；
-- 实验性 GM/T 0024 PQKEX ClientHello capability extension 编解码与协商；
-- 面向固定 GmSSL submodule 的真实 TLCP ClientHello/服务端解析集成补丁。
-- GmSSL/TLCP Certificate 握手阶段的实验 Composite signing-certificate
-  严格双验证、downgrade 防护和后续 SM2 component ServerKeyExchange 验证。
-- TLCP encryption certificate 保持普通 SM2 SPKI，同时使用 Hybrid CA 的
-  SM2 + Dilithium2 Composite certificate signature；两张实体证书都必须严格
-  双验证通过。
-- TLS 1.3 实验性私有 `post_quantum_pre_shared_key`（`0xFF03`）：复用标准
-  external PSK identity/binder 与 selected_identity，强制 PSK-DHE，并保留
-  Server Certificate/CertificateVerify 身份认证。
-
-当前不实现 SM2 + ML-KEM Hybrid KEX、Hybrid KDF、完整 GM/T 0024/TLCP
-PQKEX 握手或 ML-KEM 到 TLS/TLCP secret 的接入。目前的 PQKEX 仅完成
-ClientHello capability advertisement 和 server-side KEM selection；TLS 1.3
-`0xFF03` 只消费握手前已安全配置的 external PSK，不调用 ML-KEM。
-
-## 实现路线图
+## Architecture
 
 ```text
-1. Composite Signature Core                         ✅
-2. Composite X.509                                  ✅
-3. Hybrid CA / chain                                ✅
-4. FIPS 203 ML-KEM primitive                        ✅
-5. GM/T 0024 PQKEX capability 与 KEM 选择            ✅
-   6A. TLCP Composite signing certificate           ✅
-   6B. TLCP encryption certificate Composite-sign   ✅
-7. TLS 1.3 PQ-PSK extension                        ✅
-8. 性能 < 50 ms                                     ✅
-9. QROM 安全论证                                    ⬜
-10. 经典/量子侧信道防护方案                           ⬜
+Authentication                              Key Establishment
+SM2/SM3 + CRYSTALS-Dilithium2               FIPS 203 ML-KEM-768
+                |                                      |
+       Composite Signature                    standalone primitive
+                |                                      |
+       Composite Certificate                  future TLCP Hybrid KEX
+                |
+   TLCP certificate-chain verification
+
+TLS 1.3 0xFF03: separately provisioned external PSK + ECDHE + certificate auth
 ```
 
-其中第 5 项的完成范围仅是实验性 TLCP ClientHello capability extension、严格
-编解码与 KEM 选择，不表示已经实现 ML-KEM ServerKeyExchange、
-ClientKeyExchange、Hybrid Secret 或完整 GM/T 0024 PQKEX 握手。6A 已完成
-Composite signing certificate 的证书链双验证；6B 已完成普通 SM2 encryption
-SPKI 与 Composite CA signature 的解耦及双验证。ServerKeyExchange
-proof-of-possession 仍是原 TLCP SM2 signature，后续项目仍为待实现项。
-
-## 算法和编码
-
-Composite 算法 OID：
-
-```text
-1.3.6.1.4.1.32473.1.1
-```
-
-这是基于 RFC 5612 documentation PEN 的**实验/演示 OID**。
-
-> This OID is experimental and is not an IETF/GM/T standardized
-> SM2-Dilithium composite signature OID.
-
-它不能用于生产注册空间，不代表 IANA、IETF 或 GM/T 已分配该组合算法。
-`1.3.6.1.4.1.2.267.7` 是课题指定的 Dilithium/PQC X.509v3 标识扩展，
-不是 IETF generic PQC OID，也不等于 Composite 算法 OID。该扩展只保存 DER
-`NULL` 标识值，不再保存第二公钥或第二签名。
-
-Root 和 Composite signing certificate 的三个 X.509 位置使用同一个 Composite
-OID，且 `parameters` 必须 ABSENT：
-
-```text
-TBSCertificate.signature.algorithm
-Certificate.signatureAlgorithm.algorithm
-SubjectPublicKeyInfo.algorithm.algorithm
-```
-
-TLCP encryption certificate 保持普通 SM2 SPKI；仅它的 TBS/outer signature
-AlgorithmIdentifier 使用 Composite OID。这是 subject key type 与 issuer
-certificate signature type 的有意解耦。
-
-公钥编码直接放在 SPKI 的单个 BIT STRING 中：
-
-```text
-CompositePublicKey = Dilithium2PublicKey || SM2PublicKey
-                   = 1312 bytes          || 65 bytes
-```
-
-SM2 使用 sm2p256v1 未压缩点 `0x04 || X(32) || Y(32)`；解析时检查总长度、
-`0x04`、曲线名，并通过 EVP public check 验证点在曲线上。
-
-签名直接放在 Certificate 的单个 `signatureValue` BIT STRING 中：
-
-```text
-CompositeSignature = Dilithium2Signature || DER(SM2Signature)
-                   = 2420 bytes           || variable DER SEQUENCE(r, s)
-```
-
-SM2 DER 解码必须消耗全部输入、无 trailing bytes、`r/s` 为正非零整数，并且
-重新编码后必须逐字节等于原 DER。
-
-## 唯一 Composite Signature Core
-
-核心位于：
-
-```text
-include/composite_key.h   src/composite_key.c
-include/composite_sig.h   src/composite_sig.c
-```
-
-调用者只提交 raw message `M`。`composite_build_message()` 统一构造：
-
-```text
-PH(M)   = SM3(M)
-Prefix  = ASCII("CompositeAlgorithmSignatures2025")
-Label   = ASCII("COMPSIG-DILITHIUM2-SM2-SM3")
-len(ctx)= 一个无符号字节
-M'      = Prefix || Label || len(ctx) || ctx || SM3(M)
-```
-
-当前普通消息和 X.509 证书均使用空 `ctx`。接口保留 0..255 字节 `ctx`，供未来
-协议规范定义 domain separation；本阶段没有虚构 TLS/GM/T context。
-
-`M'` 同时交给 CRYSTALS-Dilithium2 与现有 SM2-with-SM3 primitive。Composite
-层的 `SM3(M)` 和 SM2 算法内部的 `ZA`/`SM3(ZA || M')` 是两个不同层次，后者
-没有被删除。SM2 ID 集中为 `1234567812345678`。
-
-所有双组件签名只在 `composite_sign()` 内调用两个 primitive；所有双组件验证
-只在 `composite_verify_detailed()` 内调用两个 primitive并作严格 AND 判断。
-`hybrid_sign()`/`hybrid_verify()` 仅是旧消息 API 的兼容适配器，内部委托
-Composite Core，不包含第二套密码算法流程。
-
-```text
-                            Composite Signature Core
-                 composite_build_message / sign / verify
-                                  |
-             +--------------------+--------------------+
-             |                    |                    |
-       Message tests       X.509 Certificate      Future protocol
-         raw M             DER(TBSCertificate)    protocol-signed data
-```
-
-证书签发使用 CA Hybrid Private Key；普通 Server 消息及未来 CertificateVerify
-使用 Server Hybrid Private Key。两者使用相同 core，只是 key、raw `M` 和未来
-可能的 `ctx` 不同。
-
-## PKI 和扩展
-
-```text
-Root Hybrid CA
-├── SPKI: Dilithium_CA_PK || SM2_CA_PK
-├── BasicConstraints: critical, CA:TRUE
-├── KeyUsage: critical, keyCertSign, cRLSign
-└── signatureValue: Dilithium_CA_SIG || DER(SM2_CA_SIG)
-          |
-          | signs DER(Server TBSCertificate) with CA Hybrid SK
-          v
-Server Hybrid Certificate
-├── SPKI: Dilithium_Server_PK || SM2_Server_PK
-├── BasicConstraints: critical, CA:FALSE
-├── KeyUsage: critical, digitalSignature
-├── ExtendedKeyUsage: serverAuth
-├── SubjectAltName: DNS:server.local
-├── SubjectKeyIdentifier / AuthorityKeyIdentifier
-├── 课题 Dilithium/PQC 标识扩展: 1.3.6.1.4.1.2.267.7
-└── signatureValue: Dilithium_CA_SIG || DER(SM2_CA_SIG)
-```
-
-Root 被显式配置为 trust anchor；自签名验证只证明其 Composite 自签名在密码学
-上有效，不是 Root 获得信任的来源。
-
-## FIPS 203 / ML-KEM-768
-
-ML-KEM primitive 位于：
-
-```text
-include/mlkem.h
-src/mlkem.c
-```
-
-它是独立的 `mlkem` library target，不依赖也不被 `hybrid_pqc`、Composite
-Signature 或 X.509 模块依赖：
-
-```text
-Authentication                          Key Establishment
-SM2 + CRYSTALS-Dilithium2               FIPS 203 ML-KEM-768
-        |                                       |
-Composite Signature Certificate         standalone primitive only
-                                                |
-                                                v
-                                  future SM2 + ML-KEM-768 Hybrid KEX
-                                                |
-                                                v
-                              future PQKEX key exchange messages
-```
-
-实现使用仓库固定的 liboqs 0.16.0（commit
-`c27c88b76473f67a8072ce5b66874d172287ff96`），algorithm identifier 为
-`OQS_KEM_alg_ml_kem_768` / `ML-KEM-768`，其 ML-KEM wrapper 标记
-`alg_version = "FIPS203"`，底层是 liboqs 收录的 `mlkem-native`。CMake 使用
-`OQS_MINIMAL_BUILD=KEM_ml_kem_768`，旧 `Kyber768`、`kyber_768` 等算法即使在
-liboqs 源码树中存在，也不会被编译或作为 fallback。
-
-固定参数为：
-
-```text
-encapsulation key (ek): 1184 bytes
-decapsulation key (dk): 2400 bytes
-ciphertext:             1088 bytes
-shared secret:            32 bytes
-```
-
-wrapper 在每次操作前检查 provider 可用性、正式算法名、`FIPS203` 版本标记和
-全部四个 runtime length，并对 API 输入作 NULL、精确输入长度和输出容量检查。
-FIPS 203 的 encapsulation-key modulus check 与 decapsulation-key embedded
-public-key-hash check 由 `mlkem-native` provider 在 Encaps/Decaps 内执行；本项目
-不重复编写不完整的多项式检查。长度正确但内容被修改的 ciphertext 使用 FIPS
-203 implicit rejection：Decaps 仍可输出 32-byte secret，测试判断它与原合法
-shared secret 不同，而不把“API 返回成功”误写成 ciphertext 已认证。
-
-生产 API 只暴露随机化的 KeyGen/Encaps/Decaps。确定性 `d`、`z`、`m` 入口只在
-`tests/test_mlkem_kat.c` 使用，未进入 `include/mlkem.h`。KAT 来源是 NIST
-ACVP-Server tag `v1.1.0.42` 的 FIPS203 vectors：ML-KEM-768 KeyGen tgId 2 / tcId
-26，以及 Encaps/Decaps tgId 2 / tcId 26；测试逐字节比较 ek、dk、ciphertext 和
-shared secret。
-
-这表示项目集成的是 FIPS 203 定义的 ML-KEM-768 算法，不表示 liboqs 或本项目
-本身获得了 CMVP/FIPS 140 module validation。ML-KEM key 目前仅在内存中存在，
-不持久化，也不进入当前 Composite Certificate SPKI。
-
-## Experimental GM/T 0024 PQKEX Extension
-
-仓库固定的 `third_party/GmSSL` 已有 GM/T 0024/TLCP ClientHello、通用 TLS
-Extension 编解码和握手状态机。为保持第三方 submodule 固定且干净，实际 TLCP
-接入只实现一次，不在主仓库另设重复的 PQKEX parser；改动不直接提交到 GmSSL
-工作树，而是保存在：
-
-```text
-patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch
-```
-
-该补丁基于 GmSSL commit `24ae482701a7b124826c382fffc55c19f76d475d`，完成：
-
-- TLCP client 按配置将 `0xFF02` 写入真实 ClientHello extensions；
-- TLCP server 严格解析 capability，拒绝 duplicate，并按 client preference 选择；
-- 将结果保存在 `pqkex_offered`、`pqkex_negotiated` 和
-  `pqkex_selected_kem`，供下一阶段 ServerKeyExchange 使用；
-- 增加 GmSSL 内部固定 wire vector、完整负向解析和 duplicate 测试；
-- 提供 `gmssl pqkex_demo` capability-only 演示命令。
-
-补丁不修改 ServerHello，不携带 ML-KEM public key/ciphertext，不调用 GmSSL 的
-Kyber 或本项目 ML-KEM primitive，也不派生 shared secret。PQKEX wire parser、
-KEM 选择和 TLCP 接入均由该补丁提供，项目中不存在第二套 PQKEX 实现。
-
-实验 ExtensionType：
-
-```text
-PQKEX_EXTENSION_TYPE = 0xFF02 (decimal 65282)
-```
-
-`0xFF02` 是项目私有实验标识，不是 GM/T 或 IANA 正式分配的 PQKEX extension
-identifier。当前唯一协议 KEM ID 为：
-
-```text
-0xFF02 is a project-private experimental extension identifier.
-It is NOT an officially assigned GM/T or IANA PQKEX extension identifier.
-```
-
-```text
-PQKEX_KEM_MLKEM768 = 0x0001  // ML-KEM-768 / FIPS 203
-```
-
-传统组件 SM2 由未来 GM/T 0024 key establishment 负责，不编码为
-`SM2_MLKEM768`。PQKEX extension 当前只表示客户端支持哪些 PQ KEM：
-
-```text
-extension_data = uint16 kem_list_length || uint16 kem_ids[]
-```
-
-单一 ML-KEM-768 的固定编码为：
-
-```text
-FF 02 | 00 04 | 00 02 | 00 01
- type | extlen | listlen| KEM ID
-```
-
-即 `FF02000400020001`。未知 KEM ID 可以作为 syntactically valid capability
-被解析，但只有 server 本地支持的 ID 才可能被选择；选择策略集中在
-`tls_pqkex_select_kem()`，按客户端偏好顺序选择第一个共同 KEM。两个 `0xFF02`
-extension 会被 ClientHello extension 扫描层拒绝，不采用 first-wins 或
-last-wins。
-
-本阶段不会在 ClientHello 发送 ML-KEM encapsulation key，也不会在 ServerHello
-发送 encapsulation key 或 ciphertext。GmSSL PQKEX 补丁不链接 `mlkem` target，
-不会调用 KeyGen、Encaps 或 Decaps。`TLS_CONNECT.pqkex_negotiated` 仅表示双方
-存在共同 capability，不表示 shared secret 已建立。
-
-后续计划的数据位置是：
-
-```text
-ServerKeyExchange: ML-KEM-768 encapsulation key + selected_kem
-ClientKeyExchange: ML-KEM-768 ciphertext
-```
-
-该分层方式参考已过期的 TLS 1.2 hybrid PQ KEM Internet-Draft
-`draft-campagna-tls-bike-sike-hybrid`，本项目不声称符合该 draft，也不声称这是
-GM/T 正式定义的 PQKEX。
-
-## TLS 1.3 post_quantum_pre_shared_key
-
-本项目定义实验性 TLS 1.3 私有扩展 `post_quantum_pre_shared_key`（`0xFF03`）。
-其协议行为参考 RFC 9973 `tls_cert_with_extern_psk`，但 `0xFF03` 并非
-RFC 9973 或 IANA 正式分配的扩展标识。
-
-> This project defines a private-use TLS 1.3 extension named
-> post_quantum_pre_shared_key with ExtensionType 0xFF03. Its behavior is
-> modeled after RFC 9973 tls_cert_with_extern_psk, but 0xFF03 is not an
-> IANA-assigned RFC 9973 extension.
-
-该扩展保存在新的、按顺序应用的 GmSSL 增量补丁中：
-
-```text
-patches/gmssl/0004-add-tls13-post-quantum-pre-shared-key.patch
-```
-
-`post_quantum_pre_shared_key` 自身只是空 flag，固定 wire 编码为：
-
-```text
-FF 03 00 00
-```
-
-真实 PSK 从不在 `0xFF03` 或其他握手字段中传输。ClientHello 与 ServerHello
-继续复用 TLS 1.3 标准 `pre_shared_key`：客户端发送 identity 与 external binder，
-服务端返回 selected_identity。ClientHello 中 `pre_shared_key` 保持最后一个
-extension；`0xFF03` 还要求 `supported_groups`、`key_share` 和包含 `psk_dhe_ke`
-的 `psk_key_exchange_modes`，并拒绝 early_data、PSK-only 与 resumption PSK。
-
-成功协商后的实际安全结构是：
-
-```text
-pre-provisioned external PSK -> Early Secret
-                                    |
-                                    + derived secret
-                                    + ECDHE shared secret
-                                    v
-                              Handshake Secret
-                                    |
-                                    v
-                     Master/Application Traffic Secrets
-
-Server identity authentication: Certificate + CertificateVerify
-```
-
-因此此模式不是 PSK-only authentication：即使 external PSK 被选中，服务端仍发送
-Certificate 与 CertificateVerify，客户端仍执行证书链和签名验证。默认 compatible
-模式在 identity 无匹配时回退到普通 certificate-authenticated TLS 1.3；双方也可用
-`-require_post_quantum_pre_shared_key` 开启 strict 模式。HelloRetryRequest 后的
-ClientHello2 会重复 `0xFF03`、保持 `pre_shared_key` 最后，并使用原 TLS 1.3 HRR
-transcript 逻辑重新计算 binder。
-
-演示命令复用 GmSSL 原有 `-psk_identity`、`-psk_cipher_suite` 和 `-psk_key`：
-
-```sh
-gmssl tls13_server ... \
-  -psk_dhe_ke \
-  -psk_identity pq-demo \
-  -psk_cipher_suite TLS_SM4_GCM_SM3 \
-  -psk_key <hex> \
-  -post_quantum_pre_shared_key
-
-gmssl tls13_client ... \
-  -psk_dhe_ke \
-  -psk_identity pq-demo \
-  -psk_cipher_suite TLS_SM4_GCM_SM3 \
-  -psk_key <same-hex> \
-  -post_quantum_pre_shared_key
-```
-
-命令行 PSK 只用于演示和测试，因为进程列表或 shell history 可能暴露参数。正式
-部署应从受保护配置、secure file、keystore 或硬件保护的 provisioning 载入；PSK
-如何生成、分发和保存不属于本阶段范围。这里的“post-quantum”属性依赖 PSK 本身
-具有足够熵，并通过抗量子安全的流程配置和保存；external PSK 不是一种 PQC 算法。
-
-固定测试使用 `TLS_SM4_GCM_SM3`，所以 PSK 关联 hash 与 TLS 1.3 HKDF hash 都是
-SM3（32 bytes）。这只是当前 cipher suite 的既有约束，不把协议概念写死为所有
-external PSK 均为 32 bytes。`tls13pqpsktest` 覆盖 wire、ClientHello companions、
-binder tamper、错误/重复/非空扩展、early_data、PSK-only、resumption type、
-unsolicited ServerHello、EncryptedExtensions 非法位置、缺失 Certificate、篡改
-CertificateVerify，以及 PSK/ECDHE 对 key schedule 的独立影响；命令测试覆盖完整
-握手、Certificate/CertificateVerify trace、application data、错误 PSK、identity
-compatible/strict 策略和 HRR。普通 certificate、PSK-DHE、PSK-only、
-resumption/early-data 路径在未启用 `0xFF03` 时保持原语义。
-
-该 TLS 1.3 功能与 TLCP `PQKEX 0xFF02`、ML-KEM primitive 和 Composite X.509
-相互独立：它不协商或调用 ML-KEM，不修改 TLCP master secret，也不把现有 TLCP
-Composite certificate 强行接入 GmSSL TLS 1.3 certificate flow。完整课题设计中，
-strong external PSK 可增强 session-key confidentiality，而 SM2 + Dilithium2
-Composite Signature 负责 authentication；两项实验可分别验证。
-
-## Experimental TLCP Hybrid Certificate
-
-相关 GmSSL 增量补丁位于：
-
-```text
-patches/gmssl/0002-integrate-tlcp-composite-certificate-verification.patch
-patches/gmssl/0003-verify-composite-signed-tlcp-encryption-certificate.patch
-```
-
-0002 必须在冻结的 0001 之后应用；0003 再提供实验 Composite certificate
-signature OID 的语法识别及 hybrid loader 的 cert[1] raw indexing。0003 不实现
-Composite 密码学验证。Composite ASN.1、签名组合与链验证仍只存在于
-主项目；`include/tlcp_hybrid_cert_adapter.h` 和
-`src/tlcp_hybrid_cert_adapter.c` 提供 raw-DER、无临时 PEM 文件的窄适配层。
-GmSSL 只接收 `VALID / INVALID / NOT_APPLICABLE`、详细日志结果以及已验证的
-65-byte SM2 component public key。
-
-```text
-tlcp_recv_server_certificate
-        |
-        +-- Composite -> adapter -> signing cert Dilithium2 AND SM2
-        |                         -> encryption cert Dilithium2 AND SM2
-        |                         -> encryption SPKI remains ordinary SM2
-        |                         -> VALID or fatal bad_certificate
-        |
-        +-- non-Composite, compatible mode -> original tls_cert_chain_verify
-```
-
-strict expected-hybrid 模式下，普通 SM2 signing certificate 被视为 downgrade 并
-终止；compatible 模式下 `NOT_APPLICABLE` 才允许进入原 GmSSL verifier。
-`INVALID` 永不 fallback。Composite SPKI 的 SM2 component 通过现有
-`composite_parse_public_key()` 路径取得，由 GmSSL 公开的 public-key import
-路径转换为 `SM2_KEY`，供原 TLCP ServerKeyExchange SM2 签名验证继续使用。
-
-第六阶段 B 的测试矩阵覆盖：cert[1] 普通 SM2 SPKI、Composite inner/outer
-signature OID、PQC marker、双组件严格 AND、GmSSL SM2 encryption key 提取及
-完整 Certificate/SKE 状态推进。负向用例分别覆盖 cert[1] Dilithium/SM2 签名
-篡改、marker 缺失、inner/outer OID 不一致、错误 CA 的任一组件、cert[0]/cert[1]
-任一无效、普通 SM2 CA 签名的 cert[1] downgrade，以及 encryption private key
-与 cert[1] SPKI 不匹配；握手失败映射为 fatal `bad_certificate`。普通双 SM2 TLCP
-仍由原路径处理并通过 GmSSL 回归测试。
-
-本阶段的安全语义是：
-
-```text
-Certificate-chain authentication:  SM2 + Dilithium2 strict Composite verification
-ServerKeyExchange proof-of-possession: existing TLCP SM2 signature
-```
-
-因此不声称 ServerKeyExchange 本身已经是 Composite 签名。PQKEX capability 与
-Hybrid Certificate 是两个独立实验开关；本补丁不传输 ML-KEM 数据，不修改
-master secret、PRF/KDF、Finished 或 record layer。
-
-验证 GmSSL 补丁时应使用临时 worktree，不污染固定 submodule。例如：
-
-```sh
-gmssl_worktree="$(mktemp -d)"
-git -C third_party/GmSSL worktree add --detach "$gmssl_worktree" \
-  24ae482701a7b124826c382fffc55c19f76d475d
-scripts/apply_gmssl_patches.sh "$gmssl_worktree"
-cmake -S "$gmssl_worktree" -B "$gmssl_worktree/build" \
-  -DBUILD_SHARED_LIBS=OFF -DENABLE_QUIC=OFF -DENABLE_KYBER=OFF
-cmake --build "$gmssl_worktree/build" --target pqkextest gmssl-bin -j
-"$gmssl_worktree/build/bin/pqkextest"
-"$gmssl_worktree/build/bin/gmssl" pqkex_demo
-scripts/test_gmssl_hybrid_integration.sh "$gmssl_worktree/build"
-git -C third_party/GmSSL worktree remove "$gmssl_worktree"
-```
-
-## 构建、生成和验证
-
-依赖初始化：
+ML-KEM 不进入 Composite Certificate SPKI；当前也未接入 TLCP master secret、
+PRF/KDF 或完整 SM2 + ML-KEM Hybrid KEX。`0xFF02` PQKEX 与 `0xFF03` PQ-PSK
+是彼此独立的实验。
+
+## Project Status
+
+| Component | Status |
+|---|:---:|
+| Composite Signature Core | ✅ |
+| Composite X.509 | ✅ |
+| Hybrid CA / Chain | ✅ |
+| ML-KEM-768 primitive | ✅ |
+| PQKEX capability / KEM selection | ✅ |
+| TLCP signing certificate integration | ✅ |
+| TLCP encryption certificate integration | ✅ |
+| TLS 1.3 PQ-PSK | ✅ |
+| Performance benchmark | ✅ |
+| QROM security argument | ⬜ |
+| Side-channel protection analysis | ⬜ |
+
+这里的 PQKEX 完成状态只表示 capability advertisement、严格编解码与 KEM
+selection。TLCP Certificate-chain authentication 已执行 Hybrid strict AND，
+但 ServerKeyExchange proof-of-possession 仍使用原 TLCP SM2 signature。
+
+## Quick Start
+
+构建要求支持 C11 的编译器、CMake 3.16+、Git，以及仓库固定的 submodule：
 
 ```sh
 git submodule update --init --recursive
-```
-
-标准构建与测试：
-
-```sh
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-独立运行 ML-KEM demo：
+CMake 默认将 `OPENSSL_ROOT_DIR` 指向仓库中的 OpenSSL 3.2.0，并要求精确版本；
+liboqs 只构建 ML-KEM-768，不启用旧 Kyber fallback。
 
-```sh
-./build/mlkem_demo
-```
+## Basic Usage
 
-它只输出 provider、参数长度和 PASS/FAIL，不打印 dk 或 shared secret。
-
-口令只从环境变量读取，不放在命令行或日志中。首次运行生成并持久化四组互不
-复用的组件密钥；后续运行加载 key store，并在签发前验证 loaded CA/Server
-Hybrid key 与已有 Root/Server 证书 Composite SPKI 完全匹配；提供 encryption
-输出参数时还会持久化独立 SM2 encryption key，并核对其普通 SM2 SPKI：
+首次生成证书时会在 `keys/` 创建加密 key store；口令必须通过环境变量提供：
 
 ```sh
 HYBRID_KEY_PASSPHRASE='use-a-strong-local-secret' \
   ./build/generate_demo_chain \
   certs/root_hybrid.crt certs/root_hybrid.der \
-  certs/server_hybrid.crt certs/server_hybrid.der \
-  certs/server_encryption.crt certs/server_encryption.der
+  certs/server_hybrid.crt certs/server_hybrid.der
 ```
-
-在四证书参数的兼容调用中第 5 个参数是可选 key root；提供 encryption PEM/DER
-时，最后一个参数是可选 key root。默认都是 `keys/`。文件布局：
-
-```text
-keys/ca/sm2_private.pem
-keys/ca/dilithium2_private.enc
-keys/server/sm2_private.pem
-keys/server/dilithium2_private.enc
-keys/server-encryption/sm2_private.pem
-```
-
-`server-encryption` 只保存独立 SM2 encryption private key，不生成或保存
-Dilithium subject key。其证书 SPKI 是 `id-ecPublicKey + sm2p256v1`，而 inner/outer
-signatureAlgorithm 和 signatureValue 使用实验 Composite CA signature。加载后
-逐字节核对 encryption certificate 的 SM2 SPKI，失配时失败关闭。
-
-SM2 使用 AES-256-CBC PBES2 加密 PKCS#8。Dilithium2 使用项目自描述的
-AES-256-GCM 认证加密容器，PBKDF2-HMAC-SHA256（200000 次）派生密钥，随机
-16-byte salt 和 12-byte IV；容器保存 Dilithium2 public/secret key，加载后通过
-Composite sign/verify 自检其配对关系。目录权限要求 `0700`，文件 `0600`；
-错误口令、容器篡改、部分 key store 或证书 SPKI 失配均失败关闭。
-
-`composite_build_message()` 的固定测试向量使用 `M="abc"`、
-`ctx=01 02 03`，对完整 94-byte `M'` 逐字节比较。
-
-详细链验证：
 
 ```sh
 ./build/verify_chain certs/root_hybrid.crt certs/server_hybrid.crt
 ./build/inspect_hybrid_cert certs/server_hybrid.crt
+./build/mlkem_demo
 ```
 
-使用仓库固定 OpenSSL 3.2.0 做结构检查：
+`mlkem_demo` 不输出 decapsulation key 或 shared secret。TLCP encryption
+certificate 的生成参数、GmSSL patch 应用与集成测试见专题文档。
 
-```sh
-env LD_LIBRARY_PATH=third_party/openssl \
-  third_party/openssl/apps/openssl asn1parse \
-  -inform DER -in certs/server_hybrid.der -i
-```
+## Performance
 
-OpenSSL 3.2.0 不认识该实验 Composite OID，因此 `openssl verify` 不能作为
-Composite 密码学验收依据；`verify_chain` 才执行本项目的双组件严格验证。
-
-Sanitizer 回归：
-
-```sh
-cmake -S . -B build-sanitize -DHYBRID_ENABLE_SANITIZERS=ON
-cmake --build build-sanitize -j
-ASAN_OPTIONS=detect_leaks=0 \
-  ctest --test-dir build-sanitize --output-on-failure
-```
-
-主项目也可将 `detect_leaks` 设为 `1`，当前 13 项测试无泄漏。patched GmSSL
-启用 ASan 和 UBSan 时需对未修改的上游 SM4 `GETU32/S32` signed-shift 报告使用
-`-fno-sanitize=shift`。`tls13pqpsktest` 可保持 LeakSanitizer 开启；TLS 1.3 CLI
-回归的证书夹具需使用 `detect_leaks=0`，因为固定上游 `reqsign` 的
-`x509_cert_new_from_file()` 存在 565-byte 泄漏。固定上游 `x509_crltest` 另有
-与本阶段无关的 zero-length/null-pointer UBSan 报告。本项目不在增量 GmSSL 补丁
-中夹带修复这些非 TLS 1.3 PQ-PSK 路径的问题。
-
-## Performance Benchmark
-
-课题的主要性能验收指标是公开 `composite_verify()` 的平均验证时间严格小于
-`50 ms`。`ECDSA-P256-SHA256`（NIST P-256 / `prime256v1` / `secp256r1` 与
-SHA-256）只作为性能 baseline，不会替换项目实际使用的 SM2 +
-CRYSTALS-Dilithium2。
-
-独立 target `benchmark_composite_verify` 使用确定性的 1024-byte raw message
-（`message[i] = i & 0xff`）测量以下四项：
-
-- ECDSA-P256-SHA256 Verify；
-- SM2-SM3 Verify；
-- CRYSTALS-Dilithium2 Verify；
-- SM2 + Dilithium2 Composite Verify。
-
-Composite 项直接调用完整的 `composite_verify()`，因此计入 signature parsing、
-`composite_build_message()`、SM3 pre-hash、Dilithium2 verify、SM2 verify 和严格
-AND 结果。计时区不包含 key generation、signing、证书生成、key store、磁盘
-I/O、随机数生成、benchmark 初始化或 OpenSSL provider/library 初始化，也不包含
-证书解析、路径验证和 TLCP 握手。
-
-正式数据必须使用同一个 Release 配置构建全部四项：
+正式测量必须使用 Release build：
 
 ```sh
 cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release
 cmake --build build-bench -j
-taskset -c 2 \
-  ./build-bench/benchmark_composite_verify \
-    --warmup 1000 \
-    --iterations 10000 \
-    --csv artifacts/composite_verify_benchmark.csv
+./build-bench/benchmark_composite_verify \
+  --warmup 1000 --iterations 10000 \
+  --csv artifacts/composite_verify_benchmark.csv
 ```
 
-`taskset` 是可选项；不可用时直接运行即可。`--csv` 同时生成同路径、同 basename
-的 `.md` 汇总。输出包括 count、mean、p50、p95、p99、min、max、相对 P-256
-比例、Composite 相对 baseline 的耗时差，以及近似 framework overhead。正式 PPT
-建议至少 10,000 次 timed iterations，并连续运行三次；应使用预先约定的代表运行
-或三次均值，不应只选择最快的一次。CPU 型号还可以用 `lscpu` 留档。
+Composite Verify 以 ECDSA-P256-SHA256 为性能 baseline，项目验收目标为公开
+`composite_verify()` mean `< 50 ms`。方法、统计口径与现有结果见
+[Benchmark](docs/benchmark.md)。
 
-普通 CTest 中的 `benchmark_smoke` 只运行 10 次以确认 executable 和四条验证路径
-工作正常；它不会把 50 ms 设为跨机器的硬性时间 gate。Sanitizer builds are for
-correctness/security testing, not performance measurement；ASan、UBSan 或 Debug
-`-O0` 的结果不能作为正式性能数据。
+## Repository Layout
 
-## 参考
+```text
+include/       public headers
+src/           Composite、X.509、key store、ML-KEM 与 adapter 实现
+tests/         primitive、证书、KAT 与负向测试
+patches/gmssl/ 固定 GmSSL 的增量实验补丁
+scripts/       补丁应用与 TLCP 集成测试脚本
+docs/          设计、协议、测试与安全文档
+third_party/   固定版本的 OpenSSL、GmSSL、liboqs、Dilithium
+```
+
+## Documentation
+
+- [文档导航](docs/README.md)
+- [总体架构与模块边界](docs/architecture.md)
+- [Composite Signature](docs/composite-signature.md)
+- [Composite X.509 与证书链](docs/composite-x509.md)
+- [FIPS 203 ML-KEM-768](docs/mlkem.md)
+- [TLCP PQKEX capability](docs/tlcp-pqkex.md)
+- [TLCP Hybrid Certificate](docs/tlcp-hybrid-certificate.md)
+- [TLS 1.3 PQ-PSK](docs/tls13-pq-psk.md)
+- [Benchmark 方法](docs/benchmark.md)
+- [测试与 GmSSL patch workflow](docs/testing.md)
+- [安全模型与未完成工作](docs/security.md)
+
+## Experimental Notice
+
+这是 research / experimental project，不用于 production deployment：
+
+- Composite OID `1.3.6.1.4.1.32473.1.1` 是基于 RFC 5612 documentation
+  PEN 的实验值，不是 IETF、IANA 或 GM/T 标准化的 SM2-Dilithium OID。
+- `1.3.6.1.4.1.2.267.7` 是课题指定的 PQC marker，不是 Composite 算法 OID
+  或 IETF generic PQC OID。
+- `0xFF02`（TLCP PQKEX）与 `0xFF03`（TLS 1.3 PQ-PSK）均为 project-private
+  experimental identifier，未获 GM/T 或 IANA 正式分配。
+- 使用 FIPS 203 算法和 ACVP vector 不表示 liboqs 或本项目获得 FIPS 140/CMVP
+  module validation。
+- QROM security argument 与经典/量子侧信道防护仍未完成；当前实现不是经过
+  hardened 评估的生产密码模块。
+
+## References
 
 - [draft-ietf-lamps-pq-composite-sigs-19](https://datatracker.ietf.org/doc/html/draft-ietf-lamps-pq-composite-sigs-19)
+- [NIST FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)
+- [RFC 9973](https://www.rfc-editor.org/rfc/rfc9973.html)
 - [RFC 5612 documentation enterprise number](https://www.rfc-editor.org/rfc/rfc5612.html)
-- [NIST FIPS 203 final](https://csrc.nist.gov/pubs/fips/203/final)
-- [NIST ACVP-Server v1.1.0.42](https://github.com/usnistgov/ACVP-Server/tree/v1.1.0.42/gen-val/json-files)
-- [Expired draft-campagna-tls-bike-sike-hybrid-07](https://datatracker.ietf.org/doc/html/draft-campagna-tls-bike-sike-hybrid-07)
-- [IANA TLS ExtensionType registry](https://www.iana.org/assignments/tls-extensiontype-values)
+- GM/T 0024-2014
+- [IANA TLS ExtensionType registry](https://www.iana.org/assignments/tls-extensiontype-values/)
