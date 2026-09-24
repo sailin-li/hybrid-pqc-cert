@@ -53,25 +53,6 @@ ML-KEM 不进入 Composite Certificate SPKI；当前也未接入 TLCP master sec
 PRF/KDF 或完整 SM2 + ML-KEM Hybrid KEX。`0xFF02` PQKEX 与 `0xFF03` PQ-PSK
 是彼此独立的实验。
 
-## Project Status
-
-| Component | Status |
-|---|:---:|
-| Composite Signature Core | ✅ |
-| Composite X.509 | ✅ |
-| Hybrid CA / Chain | ✅ |
-| ML-KEM-768 primitive | ✅ |
-| PQKEX capability / KEM selection | ✅ |
-| TLCP signing certificate integration | ✅ |
-| TLCP encryption certificate integration | ✅ |
-| TLS 1.3 PQ-PSK | ✅ |
-| Performance benchmark | ✅ |
-| QROM security argument | ⬜ |
-| Side-channel protection analysis | ⬜ |
-
-这里的 PQKEX 完成状态只表示 capability advertisement、严格编解码与 KEM
-selection。TLCP Certificate-chain authentication 已执行 Hybrid strict AND，
-但 ServerKeyExchange proof-of-possession 仍使用原 TLCP SM2 signature。
 
 ## Quick Start
 
