@@ -100,3 +100,6 @@ Finished 与 record layer 保持不变。
 [draft-campagna-tls-bike-sike-hybrid-07](https://datatracker.ietf.org/doc/html/draft-campagna-tls-bike-sike-hybrid-07)，
 不声称符合该 draft，也不声称为 GM/T 正式 PQKEX。补丁应用和测试方法见
 [测试文档](testing.md)。
+
+如需在 Ubuntu 虚拟机中生成真实 TCP ClientHello 抓包，并在 Windows Wireshark
+中查看 `FF02000400020001`，见 [PQKEX 抓包指南](pqkex-capture.md)。

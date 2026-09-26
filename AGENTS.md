@@ -42,6 +42,10 @@ certificate 分别执行严格双验证，但 ServerKeyExchange 仍为原有 SM2
 - `patches/gmssl/0001-add-experimental-tlcp-pqkex-capability.patch` 将 capability
   接入固定 GmSSL 的真实 TLCP ClientHello 发送与服务端解析路径；submodule 本身
   保持干净。
+- `tools/pqkex_capture_demo.c` 与
+  `scripts/build_gmssl_pqkex_capture_demo.sh` 使用 patched GmSSL 在 Linux loopback
+  TCP 上发送一个真实 TLCP ClientHello，供生成 PCAP；仅驱动现有 0xFF02
+  编解码/选择逻辑，不实现第二套 PQKEX，也不继续完整 TLCP 握手。
 - PQKEX 固定 wire vector、严格解析、未知 KEM、协商、duplicate extension 测试和
   `gmssl pqkex_demo` 均包含在该补丁内；主仓库不保留第二套 PQKEX 实现。
 - `include/tlcp_hybrid_cert_adapter.h`、`src/tlcp_hybrid_cert_adapter.c` 提供

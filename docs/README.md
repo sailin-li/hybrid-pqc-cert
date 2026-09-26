@@ -11,6 +11,7 @@ README 只回答项目是什么、当前做到哪里以及如何快速运行；�
 | [composite-x509.md](composite-x509.md) | AlgorithmIdentifier、证书角色、扩展与链验证 |
 | [mlkem.md](mlkem.md) | FIPS 203 ML-KEM-768 wrapper、KAT 与协议隔离 |
 | [tlcp-pqkex.md](tlcp-pqkex.md) | TLCP ClientHello capability、wire format 与 KEM selection |
+| [pqkex-capture.md](pqkex-capture.md) | Ubuntu TCP loopback 抓包与 Windows Wireshark 检查 |
 | [tlcp-hybrid-certificate.md](tlcp-hybrid-certificate.md) | TLCP 双证书模型、adapter 与 downgrade policy |
 | [tls13-pq-psk.md](tls13-pq-psk.md) | TLS 1.3 私有 `0xFF03`、external PSK 和 PSK-DHE |
 | [benchmark.md](benchmark.md) | `composite_verify()` benchmark 方法与统计口径 |

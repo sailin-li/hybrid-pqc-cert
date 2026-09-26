@@ -124,6 +124,7 @@ third_party/   固定版本的 OpenSSL、GmSSL、liboqs、Dilithium
 - [Composite X.509 与证书链](docs/composite-x509.md)
 - [FIPS 203 ML-KEM-768](docs/mlkem.md)
 - [TLCP PQKEX capability](docs/tlcp-pqkex.md)
+- [TLCP PQKEX ClientHello 抓包](docs/pqkex-capture.md)
 - [TLCP Hybrid Certificate](docs/tlcp-hybrid-certificate.md)
 - [TLS 1.3 PQ-PSK](docs/tls13-pq-psk.md)
 - [Benchmark 方法](docs/benchmark.md)
